@@ -1,0 +1,28 @@
+[project]
+name = "digital-drosophila"
+version = "0.1.0"
+description = "Biologically-mapped SNN for Drosophila motor control using Brian2 + GeNN and male-cns connectome"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "neuprint-python>=0.6.1",
+    "python-dotenv>=1.2.2",
+    "plotly>=6.1",
+    "pandas>=2.2",
+    "scipy>=1.14",
+    "numpy>=2.0",
+    "brian2>=2.10.1",
+    "pygenn @ https://github.com/genn-team/genn/archive/refs/tags/5.4.0.zip",
+    "streamlit>=1.45",
+    "joblib>=1.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/digital_drosophila", "src/wiki"]

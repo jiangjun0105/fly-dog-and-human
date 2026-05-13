@@ -1,0 +1,33 @@
+{
+  "description": "The complete MaleCNS connectome from the Janelia FlyEM Team Project and the Cambridge Drosophila Connectomics Group, covering the brain and nerve cord, 166k neurons.\n\n- [Project overview](https://www.janelia.org/project-team/flyem/male-cns-connectome)\n- Companion sites:\n    - [Male CNS Connectome Site](https://janelia-flyem.github.io/male-cns)\n    - [Cell Type Explorer](https://reiserlab.github.io/celltype-explorer-drosophila-male-cns)\n    - [Base neuroglancer scene](https://neuroglancer-demo.appspot.com/#!gs://flyem-male-cns/v0.9/male-cns-v0.9.json)\n    - [Clio](https://clio.janelia.org/ws/annotate?dataset=male-cns:v0.9&tab=bodies)\n",
+  "total_pre_count": 45656140,
+  "total_post_count": 311833243,
+  "roi_count": 5412,
+  "primary_roi_count": 152,
+  "vnc_neuron_count": 25635,
+  "motor_neuron_count": 702,
+  "vnc_roi_count": 21,
+  "vnc_rois": [
+    "ANm",
+    "HTct(UTct-T3)(L)",
+    "HTct(UTct-T3)(R)",
+    "LegNp(T1)(L)",
+    "LegNp(T1)(R)",
+    "LegNp(T2)(L)",
+    "LegNp(T2)(R)",
+    "LegNp(T3)(L)",
+    "LegNp(T3)(R)",
+    "NTct(UTct-T1)(L)",
+    "NTct(UTct-T1)(R)",
+    "VNC",
+    "VNC-unspecified",
+    "WTct(UTct-T2)(L)",
+    "WTct(UTct-T2)(R)",
+    "mVAC(T1)(L)",
+    "mVAC(T1)(R)",
+    "mVAC(T2)(L)",
+    "mVAC(T2)(R)",
+    "mVAC(T3)(L)",
+    "mVAC(T3)(R)"
+  ]
+}

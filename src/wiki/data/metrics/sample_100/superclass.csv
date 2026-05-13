@@ -1,0 +1,15 @@
+superclass,count,category
+vnc_intrinsic,13149,Intrinsic
+vnc_sensory,6326,Sensory
+ascending_neuron,1843,Other
+descending_neuron,1305,Other
+vnc_motor,702,Motor
+sensory_ascending,534,Sensory
+vnc_efferent,99,Other
+vnc_tbc,37,Other
+vnc_sensory_tbc,27,Sensory
+sensory_descending,12,Sensory
+efferent_ascending,8,Other
+cb_intrinsic,4,Intrinsic
+descending_neuron_tbc,2,Other
+sensory_ascending_tbc,1,Sensory
