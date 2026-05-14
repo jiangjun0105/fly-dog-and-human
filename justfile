@@ -2,7 +2,7 @@
 
 # Launch the Streamlit wiki/explorer
 wiki:
-    uv run streamlit run run_app.py
+    uv run streamlit run src/wiki/app.py
 
 # Export pre-computed metrics to data/metrics/ (commit these to git)
 export:

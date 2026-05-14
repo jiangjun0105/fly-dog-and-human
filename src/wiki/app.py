@@ -4,7 +4,7 @@ Digital Drosophila — Connectome Explorer (UI)
 Sidebar-routed multi-page app. Each page module exposes a `render()` function.
 
 Usage:
-    uv run streamlit run run_app.py
+    just wiki
 """
 
 import streamlit as st
@@ -28,3 +28,7 @@ def main():
 
     nav = st.navigation(PAGES)
     nav.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -23,8 +23,8 @@ src/wiki/
     └── sample_100/         # default sample size
 ```
 
-Entry point: `run_app.py` → calls `wiki.app.main()`.
-Launch: `just wiki` (or `uv run streamlit run run_app.py`).
+Entry point: `src/wiki/app.py` — `main()` at module level.
+Launch: `just wiki` (or `uv run streamlit run src/wiki/app.py`).
 
 ## How to add a new page
 
