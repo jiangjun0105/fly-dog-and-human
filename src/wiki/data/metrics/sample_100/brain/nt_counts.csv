@@ -1,0 +1,9 @@
+neurotransmitter,count,sign
+acetylcholine,85782,excitatory (+1)
+glutamate,26761,inhibitory (−1)
+gaba,16179,inhibitory (−1)
+histamine,7300,inhibitory (−1)
+unclear,7048,modulatory
+dopamine,4459,modulatory
+octopamine,51,modulatory
+serotonin,24,modulatory

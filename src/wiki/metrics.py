@@ -34,6 +34,8 @@ from digital_drosophila.constants import (
 )
 from digital_drosophila.data import (
     find_nt_column,
+    load_all_neurons,
+    load_brain_neurons,
     load_connectivity,
     load_dataset_overview,
     load_vnc_neurons,
@@ -43,6 +45,22 @@ from digital_drosophila.data import (
 _WIKI_ROOT = Path(__file__).resolve().parent
 METRICS_DIR = _WIKI_ROOT / "data" / "metrics"
 
+SCOPES = ("total", "vnc", "brain")
+
+
+def _load_neurons_for_scope(scope: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if scope == "total":
+        return load_all_neurons()
+    if scope == "vnc":
+        return load_vnc_neurons()
+    if scope == "brain":
+        return load_brain_neurons()
+    raise ValueError(f"Unknown scope: {scope}")
+
+
+# ---------------------------------------------------------------------------
+# Compute functions (parameterized by scope)
+# ---------------------------------------------------------------------------
 
 @memory.cache
 def compute_dataset_stats() -> dict:
@@ -63,55 +81,71 @@ def compute_dataset_stats() -> dict:
 
 
 @memory.cache
-def compute_superclass_distribution() -> pd.DataFrame:
-    vnc_df, _ = load_vnc_neurons()
-    if "superclass" not in vnc_df.columns:
+def compute_scope_stats(scope: str) -> dict:
+    neurons_df, _ = _load_neurons_for_scope(scope)
+    neuron_count = len(neurons_df)
+    motor_count = int((neurons_df["superclass"] == "vnc_motor").sum()) if "superclass" in neurons_df.columns else 0
+    pre_total = int(neurons_df["pre"].sum()) if "pre" in neurons_df.columns else 0
+    post_total = int(neurons_df["post"].sum()) if "post" in neurons_df.columns else 0
+    return {
+        "scope": scope,
+        "neuron_count": neuron_count,
+        "motor_neuron_count": motor_count,
+        "pre_total": pre_total,
+        "post_total": post_total,
+    }
+
+
+@memory.cache
+def compute_superclass_distribution(scope: str = "vnc") -> pd.DataFrame:
+    neurons_df, _ = _load_neurons_for_scope(scope)
+    if "superclass" not in neurons_df.columns:
         return pd.DataFrame(columns=["superclass", "count", "category"])
-    sc = vnc_df["superclass"].value_counts().reset_index()
+    sc = neurons_df["superclass"].value_counts().reset_index()
     sc.columns = ["superclass", "count"]
     sc["category"] = sc["superclass"].map(superclass_category)
     return sc
 
 
 @memory.cache
-def compute_cell_type_distribution() -> tuple[pd.DataFrame, int]:
-    vnc_df, _ = load_vnc_neurons()
-    if "type" not in vnc_df.columns:
+def compute_cell_type_distribution(scope: str = "vnc") -> tuple[pd.DataFrame, int]:
+    neurons_df, _ = _load_neurons_for_scope(scope)
+    if "type" not in neurons_df.columns:
         return pd.DataFrame(columns=["type", "count"]), 0
-    counts = vnc_df["type"].value_counts().reset_index()
+    counts = neurons_df["type"].value_counts().reset_index()
     counts.columns = ["type", "count"]
-    return counts, int(vnc_df["type"].nunique())
+    return counts, int(neurons_df["type"].nunique())
 
 
 @memory.cache
-def compute_nt_distribution() -> dict:
-    vnc_df, _ = load_vnc_neurons()
-    nt_col = find_nt_column(vnc_df)
+def compute_nt_distribution(scope: str = "vnc") -> dict:
+    neurons_df, _ = _load_neurons_for_scope(scope)
+    nt_col = find_nt_column(neurons_df)
     if nt_col is None:
         return {"nt_col": None, "nt_counts": pd.DataFrame(), "missing_count": 0, "missing_pct": 0.0}
 
-    nt_counts = vnc_df[nt_col].value_counts().reset_index()
+    nt_counts = neurons_df[nt_col].value_counts().reset_index()
     nt_counts.columns = ["neurotransmitter", "count"]
     nt_counts["sign"] = nt_counts["neurotransmitter"].map(
         lambda x: NT_SIGN_LABELS.get(NT_SIGN_MAP.get(str(x).lower()), "?")
     )
-    missing = int(vnc_df[nt_col].isna().sum())
+    missing = int(neurons_df[nt_col].isna().sum())
     return {
         "nt_col": nt_col,
         "nt_counts": nt_counts,
         "missing_count": missing,
-        "missing_pct": 100.0 * missing / len(vnc_df) if len(vnc_df) > 0 else 0.0,
+        "missing_pct": 100.0 * missing / len(neurons_df) if len(neurons_df) > 0 else 0.0,
     }
 
 
 @memory.cache
-def compute_synapse_distributions() -> dict:
-    vnc_df, _ = load_vnc_neurons()
+def compute_synapse_distributions(scope: str = "vnc") -> dict:
+    neurons_df, _ = _load_neurons_for_scope(scope)
     result = {}
     for col in ["pre", "post"]:
-        if col not in vnc_df.columns:
+        if col not in neurons_df.columns:
             continue
-        series = vnc_df[col]
+        series = neurons_df[col]
         p99 = float(series.quantile(0.99))
         result[col] = {
             "values_clipped": series.clip(upper=p99).values,
@@ -121,14 +155,14 @@ def compute_synapse_distributions() -> dict:
 
 
 @memory.cache
-def compute_motor_neuron_metrics() -> dict:
-    vnc_df, _ = load_vnc_neurons()
-    nt_col = find_nt_column(vnc_df)
+def compute_motor_neuron_metrics(scope: str = "vnc") -> dict:
+    neurons_df, _ = _load_neurons_for_scope(scope)
+    nt_col = find_nt_column(neurons_df)
 
-    if "superclass" not in vnc_df.columns:
+    if "superclass" not in neurons_df.columns:
         return {"count": 0}
 
-    motor = vnc_df[vnc_df["superclass"] == "vnc_motor"]
+    motor = neurons_df[neurons_df["superclass"] == "vnc_motor"]
     if len(motor) == 0:
         return {"count": 0}
 
@@ -156,6 +190,38 @@ def compute_motor_neuron_metrics() -> dict:
         result["neuromere_breakdown"] = soma
 
     return result
+
+
+@memory.cache
+def compute_roi_distribution(scope: str = "vnc") -> pd.DataFrame:
+    import ast
+
+    neurons_df, _ = _load_neurons_for_scope(scope)
+    _, all_rois, _, vnc_rois = load_dataset_overview()
+
+    if scope == "vnc":
+        target_rois = vnc_rois
+    elif scope == "brain":
+        target_rois = sorted(set(all_rois) - set(vnc_rois))
+    else:
+        target_rois = sorted(all_rois)
+
+    counts = {roi: 0 for roi in target_rois}
+    for roi_info_raw in neurons_df["roiInfo"]:
+        if pd.isna(roi_info_raw):
+            continue
+        roi_info = ast.literal_eval(str(roi_info_raw)) if isinstance(roi_info_raw, str) else roi_info_raw
+        for roi in target_rois:
+            if roi in roi_info:
+                counts[roi] += 1
+
+    df = pd.DataFrame([{"roi": k, "neuron_count": v} for k, v in counts.items()])
+    return df.sort_values("neuron_count", ascending=False).reset_index(drop=True)
+
+
+# Keep the old name as an alias for backward compatibility
+def compute_vnc_roi_distribution() -> pd.DataFrame:
+    return compute_roi_distribution("vnc")
 
 
 def _get_nt_signs(neurons_df: pd.DataFrame, nt_col: str | None, n: int) -> np.ndarray:
@@ -199,11 +265,11 @@ def compute_strategies(adj: np.ndarray, neurons_df: pd.DataFrame, nt_col: str | 
 
 
 @memory.cache
-def compute_connectivity_metrics(sample_size: int = DEFAULT_SAMPLE_SIZE) -> dict:
-    vnc_df, _ = load_vnc_neurons()
-    nt_col = find_nt_column(vnc_df)
+def compute_connectivity_metrics(sample_size: int = DEFAULT_SAMPLE_SIZE, scope: str = "vnc") -> dict:
+    neurons_df, _ = _load_neurons_for_scope(scope)
+    nt_col = find_nt_column(neurons_df)
 
-    sample_df = vnc_df.nlargest(sample_size, "post").reset_index(drop=True)
+    sample_df = neurons_df.nlargest(sample_size, "post").reset_index(drop=True)
     sample_ids = tuple(sample_df["bodyId"].tolist())
     adj = load_connectivity(sample_ids, sample_size)
 
@@ -241,15 +307,17 @@ def compute_connectivity_metrics(sample_size: int = DEFAULT_SAMPLE_SIZE) -> dict
     }
 
 
-def _compute_all(sample_size: int = DEFAULT_SAMPLE_SIZE) -> dict:
+def _compute_all(sample_size: int = DEFAULT_SAMPLE_SIZE, scope: str = "vnc") -> dict:
     return {
         "dataset_stats": compute_dataset_stats(),
-        "superclass": compute_superclass_distribution(),
-        "cell_types": compute_cell_type_distribution(),
-        "neurotransmitters": compute_nt_distribution(),
-        "synapse_distributions": compute_synapse_distributions(),
-        "motor_neurons": compute_motor_neuron_metrics(),
-        "connectivity": compute_connectivity_metrics(sample_size),
+        "scope_stats": compute_scope_stats(scope),
+        "roi_distribution": compute_roi_distribution(scope),
+        "superclass": compute_superclass_distribution(scope),
+        "cell_types": compute_cell_type_distribution(scope),
+        "neurotransmitters": compute_nt_distribution(scope),
+        "synapse_distributions": compute_synapse_distributions(scope),
+        "motor_neurons": compute_motor_neuron_metrics(scope),
+        "connectivity": compute_connectivity_metrics(sample_size, scope),
     }
 
 
@@ -257,19 +325,18 @@ def _compute_all(sample_size: int = DEFAULT_SAMPLE_SIZE) -> dict:
 # Export to data/metrics/ (clean, git-tracked files)
 # ---------------------------------------------------------------------------
 
-def _metrics_dir(sample_size: int) -> Path:
-    d = METRICS_DIR / f"sample_{sample_size}"
-    return d
+def _metrics_dir(sample_size: int, scope: str = "vnc") -> Path:
+    return METRICS_DIR / f"sample_{sample_size}" / scope
 
 
-def export_metrics(sample_size: int = DEFAULT_SAMPLE_SIZE) -> Path:
-    """Compute all metrics and write clean files to data/metrics/sample_<n>/."""
-    m = _compute_all(sample_size)
-    out = _metrics_dir(sample_size)
+def _export_scope(m: dict, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
 
-    # dataset_stats — JSON
-    (out / "dataset_stats.json").write_text(json.dumps(m["dataset_stats"], indent=2, default=str))
+    # scope_stats — JSON
+    (out / "scope_stats.json").write_text(json.dumps(m["scope_stats"], indent=2, default=str))
+
+    # roi_distribution — CSV
+    m["roi_distribution"].to_csv(out / "roi_distribution.csv", index=False)
 
     # superclass — CSV
     m["superclass"].to_csv(out / "superclass.csv", index=False)
@@ -328,21 +395,44 @@ def export_metrics(sample_size: int = DEFAULT_SAMPLE_SIZE) -> Path:
         s_meta = {"name": s["name"], "scale": s["scale"]}
         (out / f"{prefix}_meta.json").write_text(json.dumps(s_meta, default=str))
 
-    return out
+
+def export_metrics(sample_size: int = DEFAULT_SAMPLE_SIZE) -> Path:
+    """Compute all metrics for all scopes and write clean files."""
+    base = METRICS_DIR / f"sample_{sample_size}"
+
+    # Shared dataset_stats (written once at the sample_size level)
+    stats = compute_dataset_stats()
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "dataset_stats.json").write_text(json.dumps(stats, indent=2, default=str))
+
+    for scope in SCOPES:
+        m = _compute_all(sample_size, scope)
+        out = base / scope
+        _export_scope(m, out)
+
+    return base
 
 
 # ---------------------------------------------------------------------------
 # Load from data/metrics/ (fast, no computation)
 # ---------------------------------------------------------------------------
 
-def _load_exported(sample_size: int) -> dict | None:
-    d = _metrics_dir(sample_size)
-    if not (d / "dataset_stats.json").exists():
+def _load_exported_scope(sample_size: int, scope: str) -> dict | None:
+    d = _metrics_dir(sample_size, scope)
+    if not (d / "scope_stats.json").exists():
         return None
 
+    base = METRICS_DIR / f"sample_{sample_size}"
     m: dict = {}
 
-    m["dataset_stats"] = json.loads((d / "dataset_stats.json").read_text())
+    # Shared dataset_stats
+    ds_path = base / "dataset_stats.json"
+    m["dataset_stats"] = json.loads(ds_path.read_text()) if ds_path.exists() else {}
+
+    m["scope_stats"] = json.loads((d / "scope_stats.json").read_text())
+
+    roi_csv = d / "roi_distribution.csv"
+    m["roi_distribution"] = pd.read_csv(roi_csv) if roi_csv.exists() else pd.DataFrame()
 
     m["superclass"] = pd.read_csv(d / "superclass.csv") if (d / "superclass.csv").exists() else pd.DataFrame()
 
@@ -393,17 +483,26 @@ def _load_exported(sample_size: int) -> dict | None:
     return m
 
 
-def load_connectivity_metrics(sample_size: int) -> dict:
-    """Load connectivity metrics for a given sample size (exported or computed)."""
-    exported = _load_exported(sample_size)
+def load_connectivity_metrics(sample_size: int, scope: str = "vnc") -> dict:
+    """Load connectivity metrics for a given sample size and scope."""
+    exported = _load_exported_scope(sample_size, scope)
     if exported is not None:
         return exported["connectivity"]
-    return compute_connectivity_metrics(sample_size)
+    return compute_connectivity_metrics(sample_size, scope)
+
+
+def load_metrics_for_scope(scope: str, sample_size: int = DEFAULT_SAMPLE_SIZE) -> dict:
+    """Load metrics for a specific scope (total, vnc, brain)."""
+    exported = _load_exported_scope(sample_size, scope)
+    if exported is not None:
+        return exported
+    return _compute_all(sample_size, scope)
 
 
 def load_metrics(sample_size: int = DEFAULT_SAMPLE_SIZE) -> dict:
-    """Load metrics from data/metrics/ if available, otherwise compute."""
-    exported = _load_exported(sample_size)
-    if exported is not None:
-        return exported
-    return _compute_all(sample_size)
+    """Load VNC metrics (backward-compatible entry point)."""
+    m = load_metrics_for_scope("vnc", sample_size)
+    # Backward compatibility: alias roi_distribution to vnc_roi_distribution
+    if "roi_distribution" in m and "vnc_roi_distribution" not in m:
+        m["vnc_roi_distribution"] = m["roi_distribution"]
+    return m

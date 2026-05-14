@@ -72,11 +72,30 @@ def load_dataset_overview() -> tuple[dict, list[str], list[str], list[str]]:
 
 
 @memory.cache
+def load_all_neurons() -> tuple[pd.DataFrame, pd.DataFrame]:
+    connect()
+    criteria = NeuronCriteria(min_pre=1, min_post=1)
+    neurons_df, roi_counts = fetch_neurons(criteria)
+    return neurons_df, roi_counts
+
+
+@memory.cache
 def load_vnc_neurons() -> tuple[pd.DataFrame, pd.DataFrame]:
     connect()
     criteria = NeuronCriteria(rois=["VNC"], min_pre=1, min_post=1)
     neurons_df, roi_counts = fetch_neurons(criteria)
     return neurons_df, roi_counts
+
+
+@memory.cache
+def load_brain_neurons() -> tuple[pd.DataFrame, pd.DataFrame]:
+    connect()
+    all_df, all_roi_counts = load_all_neurons()
+    vnc_df, _ = load_vnc_neurons()
+    vnc_ids = set(vnc_df["bodyId"])
+    brain_df = all_df[~all_df["bodyId"].isin(vnc_ids)].reset_index(drop=True)
+    brain_roi_counts = all_roi_counts[~all_roi_counts["bodyId"].isin(vnc_ids)].reset_index(drop=True)
+    return brain_df, brain_roi_counts
 
 
 @memory.cache
