@@ -448,3 +448,53 @@ that organisms can modify and that persists across generations.
 
 **Priority:** Phase 3 or beyond. Interesting for open-ended evolution
 but not needed for basic evolutionary optimization.
+
+## Ideas
+
+> **Note:** The ideas below are exploratory and intended for future
+> investigation. They are not part of the current implementation plan.
+
+### Defining the SNN's DNA as a probabilistic generative model
+
+The "DNA" of our SNN can be thought of as two things: the **connection
+structure** (topology) and the **weights**. Rather than storing a
+specific connectome, the DNA could encode a **probabilistic model**
+capable of generating a neural network — one that produces structurally
+similar but not identical networks each time, much like how biological
+DNA produces brains that share gross architecture but differ in
+fine-scale wiring (see "The same genome, different brains" above).
+
+Concretely, the DNA file would define:
+
+1. **Neuron type specifications** — how many distinct neuron types exist,
+   along with the fixed or predefined parameters for each type. These
+   parameters include the size and coefficients of the
+   [LIF equation](lif-model-design.md) (tau_m, V_rest, V_thresh,
+   refractory period, etc.) that govern each type's electrical behavior.
+
+2. **Connectivity rules** — the number of neurons per type and the
+   probabilistic rules for how they connect to each other. Rather than
+   an explicit adjacency matrix, this would be connection probabilities,
+   fan-in/fan-out distributions, and type-to-type wiring tendencies —
+   enough to sample a concrete network from the distribution.
+
+3. **Spatial layout** — where each neuron type is located within the
+   brain, defining the spatial constraints that influence connectivity
+   (neurons that are physically close are more likely to connect,
+   axon guidance is region-dependent, etc.).
+
+Given these parameters, the DNA file encodes enough information to
+**reconstruct a neural network** that is structurally faithful to the
+original — same cell types, same broad connectivity patterns, same
+parameter ranges — without being an exact copy. Each instantiation
+would be a different sample from the same generative distribution.
+
+The neural network itself is defined using the LIF model design
+documented in the same folder. The DNA layer sits above it: it
+specifies *which* LIF neurons to create, *how* to parameterize them,
+and *how* to wire them together.
+
+This idea connects directly to section 3d (spontaneous activity-driven
+development): the probabilistic DNA would produce the initial rough
+wiring, and then developmental spontaneous activity would refine it
+into a functional circuit — just as in biology.
