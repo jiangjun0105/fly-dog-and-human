@@ -3,7 +3,8 @@
 Design reference for the Leaky Integrate-and-Fire (LIF) spiking neuron
 model used in the Digital Drosophila project. Covers the mathematical
 foundation, all parameters, neuromodulation, learning rules, and how
-the connectome data maps into each.
+the connectome data maps into each. For the implementation timeline, see
+[implementation phases](implementation-phases.md).
 
 ## The membrane equation
 
@@ -56,6 +57,12 @@ weighted by connection strength:
 I_j(t) = sum over all presynaptic neurons i:  w_ij * delta(t - t_spike_i)
 ```
 
+| Symbol | Name | Meaning |
+|--------|------|---------|
+| w_ij | Synaptic weight | Strength of the connection from neuron i to neuron j. Sign determines excitatory (+) vs inhibitory (−) |
+| t_spike_i | Spike time | The time at which presynaptic neuron i most recently fired |
+| delta(t - t_spike_i) | Dirac delta | An idealized instantaneous pulse — zero everywhere except at the exact moment t = t_spike_i, where it delivers all its energy in one instant. This is a mathematical convenience: real synaptic currents have a brief rise and decay, but for the LIF model we collapse that into a single point event |
+
 Each time a presynaptic neuron i fires at time t_spike_i, it delivers
 an instantaneous current pulse of magnitude w_ij to neuron j. The sign
 of w_ij determines the effect:
@@ -63,11 +70,71 @@ of w_ij determines the effect:
 - **w_ij > 0** (excitatory): pushes V toward threshold — from
   acetylcholine neurons
 - **w_ij < 0** (inhibitory): pushes V away from threshold — from GABA
-  and glutamate neurons
+  and glutamate neurons (including motor neurons — see sign map below)
 
 This is where the connectome data maps directly into the model: the
 adjacency matrix provides the w_ij values, and the neurotransmitter
-identity provides the sign.
+identity provides the sign. All connections in the adjacency matrix are
+CNS-to-CNS (neuron-to-neuron within the central nervous system); motor
+neuron output to muscles is not a synapse in the network but an output
+interface handled by the body model (see
+[motor neuron output](#motor-neuron-output)).
+
+### Why delta functions instead of realistic synaptic currents
+
+In biology, a spike arriving at a synapse triggers a multi-step process
+(calcium influx → vesicle fusion → NT release → receptor binding → ion
+channel opening) that produces a current with a fast rise (~0.5 ms) and
+slow exponential decay (~2–5 ms):
+
+```
+Real synaptic current (alpha function):
+
+    I(t) = w * (t/tau_syn) * exp(-t/tau_syn)
+
+                  ╱╲
+                 ╱  ╲
+                ╱    ╲___
+               ╱         ╲____
+              ╱                ╲________
+         ─────                          ─────
+              ↑
+          spike arrives
+```
+
+The delta function collapses this entire shape into a single
+instantaneous pulse — same total energy (w), delivered in zero time:
+
+```
+Delta approximation:
+
+    I(t) = w * delta(t - t_spike)
+
+              │
+              │
+              │
+              │
+         ─────┼─────────────────────────
+              ↑
+          spike arrives
+```
+
+This works because the membrane equation already has its own time
+constant (tau_m) that acts as a low-pass filter. When a delta pulse
+hits the membrane, V doesn't stay at its new value — the leak term
+`-(V - V_rest)` exponentially decays it back. The membrane smooths
+the instantaneous kick over time, producing a voltage response similar
+to what a realistic synaptic current would produce.
+
+The approximation is best when tau_m >> tau_syn (the membrane is much
+slower than the synapse). For motor neurons (tau_m ~20 ms vs tau_syn
+~2–5 ms) the match is good. For sensory neurons (tau_m ~5 ms) the
+approximation is rougher — if we need more accurate sensory dynamics
+later, we can replace the delta with an alpha or exponential synapse
+model without changing the rest of the framework.
+
+In the Brian2 implementation, the delta function becomes a simple
+addition at spike time: `I_post += w` in the `on_pre` block.
 
 ## Neuromodulated membrane equation
 
@@ -155,24 +222,36 @@ application, or from tuning against realistic firing rate targets.
 
 ### Decision table
 
-| Parameter | Resolution | Fixed / Learned / Modulated | Initialization | Rationale |
-|-----------|-----------|:---------------------------:|----------------|-----------|
-| **Topology** (i→j) | per connection | **Fixed** | From adjacency matrix | The connectome wiring is the scaffold. Structural plasticity operates on developmental timescales, not relevant for online learning |
-| **sign(w_ij)** | per neuron | **Fixed** | From `consensusNt` → sign map | Dale's principle — a neuron does not switch its neurotransmitter |
-| **w_ij** | per connection | **Learned** (STDP + reward gating) | Log-scaled synapse counts from connectome | THE primary learning mechanism. Initialize from biology, then let plasticity tune. Magnitudes change; signs don't |
-| **V_th** | per neuron | **Learned** (homeostatic) + **Modulated** (arousal) | Degree-scaled from in-degree | Two components: slow homeostatic adjustment toward target firing rate + fast modulatory shift from arousal state |
-| **tau_m** | per cell type | **Fixed base** + **Modulated** | Base per superclass (sensory ~5 ms, intrinsic ~10 ms, motor ~20 ms). Effective value shifted by arousal | Real neurons don't tune tau_m on behavioral timescales, but neuromodulators shift it by changing ion channel conductances |
-| **V_rest** | per neuron | **Fixed base** + **Modulated** | -70 mV base. Modulatory shift from dopamine/octopamine | Biophysical baseline is constant; neuromodulators shift it via receptor-mediated ion channel modulation |
-| **V_reset** | global | **Fixed** | -70 mV (= V_rest_base) | Biophysical constant — not tuned by the brain at any timescale |
-| **t_refract** | per superclass | **Fixed** | 2 ms (all types initially) | Ion channel recovery kinetics. Could refine per superclass later but low impact on first simulation |
-| **R** | global | **Fixed** (folded into weights) | 1 (dimensionless) | Membrane resistance is absorbed into the weight scaling — R * w_ij treated as single value |
-| **k_tau, k_vth, k_rest** | per cell type | **Tunable hyperparameters** | Superclass default (see above) | Modulatory coupling strengths. Per cell type because receptor expression varies by genetic identity. Initialized from superclass, overridden when literature data available |
+What each parameter does during simulation — its resolution, whether
+it changes, and why. For concrete initial values, see the
+[initialization summary](#initialization-summary).
+
+| Parameter | Resolution | Behavior | Rationale |
+|-----------|-----------|----------|-----------|
+| **Topology** (i→j) | per connection | **Fixed** | The connectome wiring is the scaffold. Structural plasticity operates on developmental timescales, not relevant for online learning |
+| **sign(w_ij)** | per neuron | **Constrained** (Phase 1–2) · **Driftable** (Phase 3) | Dale's principle holds at the transmitter level. Effective sign depends on postsynaptic receptors. Phase 1–2: STDP cannot cross zero. Phase 3: slow epigenetic drift can shift signs via receptor switching |
+| **w_ij** | per connection | **Learned** (Layer 1: STDP + reward) · **Decayed** (Layer 4) · **Rate-modulated** (Layer 5: metaplasticity) | THE primary learning mechanism. Magnitudes change via STDP, fade via decay, learning rate adjusted per-synapse by metaplasticity |
+| **V_th** | per neuron | **Learned** (Layer 2: homeostatic) + **Modulated** (Layer 3: arousal) | Two timescales: slow homeostatic adjustment toward target firing rate + fast modulatory shift from arousal state |
+| **tau_m** | per cell type | **Fixed base** + **Modulated** (Layer 3: arousal) | Determined by physical neuron properties. Effective value shifted by neuromodulators opening additional ion channels |
+| **V_rest** | per neuron | **Fixed base** + **Modulated** (Layer 3: arousal) | Biophysical baseline is constant; neuromodulators shift it via receptor-mediated ion channel modulation |
+| **V_reset** | global | **Fixed** | Biophysical constant — not tuned by the brain at any timescale |
+| **t_refract** | per superclass | **Fixed** | Ion channel recovery kinetics. Could refine per superclass later but low impact on first simulation |
+| **R** | global | **Fixed** (folded into weights) | Membrane resistance is absorbed into the weight scaling — R × w_ij treated as single value |
+| **k_tau, k_vth, k_rest** | per cell type | **Tunable hyperparameters** | Modulatory coupling strengths. Per cell type because receptor expression varies by genetic identity |
+| **target_rate** | per superclass | **Fixed** | Homeostatic set point. Each neuron class has a different healthy operating range |
+| **eta_homeo** | global | **Tunable hyperparameter** | Controls homeostatic adaptation speed. Must be slower than STDP timescale |
+| **lambda_decay** | global | **Tunable hyperparameter** | Controls forgetting speed. Balance against STDP learning rate determines retention |
+| **theta_m** | per synapse | **Learned** (Layer 5: metaplasticity) | Sliding modification threshold. Accumulates from STDP activity, decays with tau_meta |
+| **tau_meta** | global | **Tunable hyperparameter** | Controls how fast metaplasticity state decays back toward baseline |
+| **tau_eligibility** | global | **Tunable hyperparameter** | Window during which dopamine can consolidate a pending STDP weight change |
+| **sign_constraint** | global | **Config** | Controls sign handling mode: 'hard', 'soft', or 'none' |
 
 ### Design principle: fix the structure, learn the function
 
 The connectome tells us **what can connect** (topology) and **with what
-sign** (NT identity). These are fixed — they are the genetically
-determined scaffold.
+sign** (NT identity). These form the scaffold — topology is permanently
+fixed, signs are initialized with confidence weighting and constrained
+during normal learning.
 
 Learning fills in **how strong** each connection is (w_ij via STDP) and
 **how excitable** each neuron is (V_th via homeostasis). These are the
@@ -182,6 +261,40 @@ Neuromodulation sits between structure and learning — it doesn't change
 the wiring, but it shifts the operating point of the entire network
 based on behavioral state. A fly walking vs resting uses the same
 circuit with different gain settings.
+
+### Design principle: configurable learning layers
+
+Each learning mechanism is implemented as an independent, toggleable
+layer. This lets us run controlled experiments — enable STDP alone, add
+homeostasis, add decay, add metaplasticity — and observe the effect of
+each mechanism on network behavior.
+
+```
+Layer config = {
+    'burn_in':          True,   # spontaneous activity bootstrapping
+    'stdp':             True,   # spike-timing-dependent plasticity
+    'reward_gating':    True,   # dopamine-gated eligibility traces
+    'synaptic_decay':   True,   # use-it-or-lose-it weight fade
+    'homeostasis':      True,   # firing rate → threshold adjustment
+    'metaplasticity':   True,   # per-synapse STDP rate modulation (BCM)
+    'arousal':          True,   # neuromodulatory state switching
+    'sign_constraint':  'hard', # 'hard' = cannot cross zero (Phase 1–2)
+                                # 'soft' = slow drift allowed (Phase 3)
+                                # 'none' = unconstrained
+}
+```
+
+Each layer reads and writes specific parameters (see decision table).
+Layers with no dependencies can be toggled independently. Dependencies:
+
+```
+reward_gating    requires  stdp
+metaplasticity   requires  stdp
+synaptic_decay   independent (operates on w_ij directly)
+homeostasis      independent (operates on V_th directly)
+arousal          independent (operates on effective params)
+burn_in          requires  at least stdp + homeostasis
+```
 
 ### Why these specific decisions
 
@@ -210,15 +323,65 @@ per superclass captures real functional differences: sensory neurons
 integrate briefly (~5 ms, for fast responses), motor neurons integrate
 longer (~20 ms, for smooth output).
 
-**sign — fixed, never learned:** Dale's principle. A neuron uses the
-same neurotransmitter at all of its synapses throughout its life. The
-sign comes from the `consensusNt` field in the connectome data. Allowing
-sign flips would be biologically wrong and would destabilize learning.
+**sign — confidence-weighted initialization, constrained during normal
+learning:** Dale's principle holds at the transmitter level — a neuron
+releases the same neurotransmitter at all synapses. But the *effective*
+sign of a connection depends on postsynaptic receptor type (e.g.,
+nicotinic ACh receptors are excitatory, muscarinic are inhibitory).
+The `consensusNt` field provides the transmitter identity, but not all
+assignments are high-confidence — some neurons are labeled "unclear."
+
+Initialization uses confidence weighting: high-confidence signs are
+initialized far from zero (strong prior), "unclear" neurons are
+initialized near zero (weak prior, letting STDP determine the effective
+sign from activity).
+
+Phase 1–2 (`sign_constraint: 'hard'`): STDP updates cannot cross zero.
+A weight initialized positive stays positive; negative stays negative.
+Near-zero "unclear" weights can settle on either side during burn-in
+but are then locked. This prevents destabilization during normal
+learning and through the dynamics/consolidation phase.
+
+Phase 3 (`sign_constraint: 'soft'`): Slow epigenetic drift (hours–days
+timescale) can shift receptor profiles, allowing effective signs to
+change. This models postsynaptic receptor switching — the presynaptic
+neuron still releases the same transmitter, but the postsynaptic
+response can change polarity. See
+[under-pressure learning](learning-under-pressure.md) section 2b.
 
 **Topology — fixed, never learned:** The physical wiring of the fly's
 nervous system is established during development and does not rewire on
 the timescales relevant to behavior and learning (seconds to hours).
 The adjacency matrix from the connectome is the permanent scaffold.
+
+## Burn-in: bootstrapping the connectome
+
+The imported connectome has adult topology but no activity-shaped
+weights — the synapse counts have never been refined by neural activity.
+Before any task-driven learning, the model needs a **burn-in period**
+to reach a self-consistent baseline.
+
+```
+Burn-in protocol:
+1. Drive sensory neurons with low-rate Poisson input (~5 Hz)
+2. Enable: stdp + homeostasis + synaptic_decay (no reward_gating)
+3. Let STDP establish initial correlational structure
+4. Let homeostasis find each neuron's operating range
+5. Let decay prune spurious weight initializations
+6. For sign_constraint 'hard': near-zero "unclear" weights settle
+   on a side during burn-in, then lock
+7. Run until firing rates stabilize near target rates
+8. Snapshot weights and thresholds as the post-burn-in baseline
+```
+
+Only after burn-in is the network ready for task-driven learning
+(enable reward_gating, present structured stimuli). The burn-in serves
+the same function as developmental spontaneous activity in biology —
+see [normal learning](learning-normal.md) for detailed rationale.
+
+**Configurable:** `burn_in: True/False`. When False, the simulation
+starts directly from connectome-initialized weights (useful for testing
+or when loading a previously burned-in snapshot).
 
 ## Learning rules
 
@@ -263,6 +426,14 @@ This operates on a slower timescale than STDP (eta_homeo is small) and
 provides network stability. Without homeostasis, STDP can drive the
 network into runaway excitation or complete silence.
 
+**Phase 2 addition: synaptic scaling.** Threshold adjustment is a
+single knob per neuron — it raises or lowers excitability uniformly. In
+Phase 2, a second form of homeostasis is added: multiplicative scaling
+of all incoming weights. Scaling preserves the relative weight ratios
+that STDP learned while adjusting absolute magnitudes, making it less
+destructive to learned structure. See
+[normal learning](learning-normal.md) section 1e for details.
+
 ### Layer 3: Global state modulation (arousal)
 
 Neuromodulatory signals shift the operating point of the network. These
@@ -279,73 +450,280 @@ dynamics), creating conditions where more spikes occur and more STDP
 eligibility traces are generated. Dopamine then selects which of those
 traces become permanent weight changes.
 
-## Brian2 implementation sketch
+**Configurable:** `arousal: True/False`. When False, all effective
+parameters equal their base values (tau_m_eff = tau_m_base, etc.).
 
-```python
-eqs = '''
-dv/dt = (v_rest_eff - v + R * I) / tau_m_eff : volt
-I : amp
+### Layer 4: Synaptic decay — "use it or lose it" (hours–days)
 
-# Homeostatic threshold
-dv_th/dt = eta_homeo * (rate - target_rate) : volt
+All synaptic weights decay continuously toward zero. Only active
+reinforcement via STDP counteracts the decay:
 
-# Effective parameters (base + modulation)
-tau_m_eff = tau_m_base * (1 - arousal * k_tau) : second
-v_rest_eff = v_rest_base + modulatory_shift * k_rest : volt
-v_th_eff = v_th + v_th_base - arousal * k_vth : volt
+```
+At each timestep:
+    w_ij *= (1 - lambda_decay * dt)
+```
 
-# Per-neuron properties (set from connectome / cell type)
-tau_m_base : second
-k_tau : 1
-k_vth : volt
-k_rest : 1
-'''
+lambda_decay is small — the time constant is hours to days of simulated
+time. A connection that is regularly reinforced by STDP persists; an
+unused connection quietly fades.
 
-neurons = NeuronGroup(
-    N, eqs,
-    threshold='v > v_th_eff',
-    reset='v = v_rest_base',
-    refractory=t_refract,
-)
+**Three roles:**
+1. **Forgetting** — clears stale associations that are no longer reinforced
+2. **Capacity management** — prevents weight saturation over long runs
+3. **Noise cleanup** — spurious STDP coincidences are not consistently
+   reinforced, so decay removes them
 
-# STDP synapses with eligibility trace
-stdp_eqs = '''
-deligibility/dt = -eligibility / tau_eligibility : 1
-w : 1
-'''
-on_pre = '''
-I_post += w
-eligibility += A_plus * exp(-(t - lastspike_post) / tau_stdp)
-'''
-on_post = '''
-eligibility -= A_minus * exp(-(t - lastspike_pre) / tau_stdp)
-'''
+The balance between lambda_decay and STDP learning rate determines how
+quickly the network forgets vs retains. This is a tunable hyperparameter.
 
-synapses = Synapses(neurons, neurons, stdp_eqs,
-                    on_pre=on_pre, on_post=on_post)
-synapses.connect(i=pre_indices, j=post_indices)
-synapses.w = initial_weights  # from log-scaled connectome data
+**Configurable:** `synaptic_decay: True/False`. When False, weights only
+change via STDP. Useful for short simulations where saturation isn't a
+concern, or for isolating STDP effects during debugging.
 
-# Dopamine reward signal consolidates eligibility traces
-@network_operation(dt=reward_dt)
-def apply_reward():
-    synapses.w += dopamine_level * synapses.eligibility
+**Monitor during simulation: near-zero weight trap.** Under
+`sign_constraint: 'hard'`, decay can push weights to near-zero where
+they deliver negligible current, making causal pre→post pairings
+unlikely, reducing STDP reinforcement, and letting decay pull them
+closer to zero — a positive feedback loop toward silence. The weight
+is not permanently dead (STDP can still strengthen it from coincidental
+timing), but recovery odds worsen the weaker it gets. Homeostasis
+(lowering V_th when the postsynaptic neuron goes quiet) and
+metaplasticity (maximizing eta for inactive synapses) partially
+counteract this, but whether they're sufficient is an empirical
+question. Watch for: growing fraction of near-zero weights over time,
+especially during long burn-in runs.
+
+See [normal learning](learning-normal.md) section 1d for full biological
+rationale.
+
+### Layer 5: Metaplasticity — BCM sliding threshold (minutes–hours)
+
+Each synapse tracks its recent modification history and adjusts its
+STDP sensitivity. This is the BCM (Bienenstock-Cooper-Munro) mechanism
+— the "plasticity of plasticity":
+
+```
+theta_m_ij = running average of recent |delta_w_ij| changes
+
+STDP effective learning rate per synapse:
+    eta_ij = eta_base * f(theta_m_ij)
+
+where f() decreases when theta_m_ij is high (recently active synapse
+is harder to modify further) and increases when theta_m_ij is low
+(quiet synapse becomes more plastic).
+```
+
+**What it prevents:** Without metaplasticity, STDP tends toward bimodal
+weight distributions — strong weights get stronger (more postsynaptic
+firing → more causal coincidences → more strengthening), weak weights
+get weaker. Metaplasticity counteracts this "rich get richer" dynamic
+by making recently strengthened synapses harder to strengthen further.
+
+**Comparison with homeostasis:**
+- Homeostasis adjusts the *neuron's* excitability (global, one knob per neuron)
+- Metaplasticity adjusts each *synapse's* learning rate (local, one knob per synapse)
+- Both are needed: homeostasis for network-level stability, metaplasticity for synapse-level stability
+
+**Configurable:** `metaplasticity: True/False`. When False, all synapses
+use the same fixed STDP learning rate. Useful for comparing network
+dynamics with and without per-synapse rate modulation.
+
+See [normal learning](learning-normal.md) section 1f for full biological
+rationale.
+
+### Layer interaction summary
+
+```
+Layer               Operates on          Timescale        Prevents
+────────────────────────────────────────────────────────────────────
+STDP + reward       w_ij (individual)    seconds          —
+Synaptic decay      w_ij (all, uniform)  hours–days       Weight saturation, stale associations
+Metaplasticity      eta_ij (per synapse) minutes–hours    Bimodal weight distribution
+Homeostasis         V_th (per neuron)    minutes–hours    Runaway excitation / silence
+Arousal             tau_m, V_th, V_rest  seconds          — (state switching, not stability)
+```
+
+## Implementation reference
+
+Library-agnostic pseudocode for each mechanism. All layers are
+independently toggleable via the config flags.
+
+### Layer config
+
+```
+config = {
+    burn_in:          true/false
+    stdp:             true/false
+    reward_gating:    true/false    (requires stdp)
+    synaptic_decay:   true/false
+    homeostasis:      true/false
+    metaplasticity:   true/false    (requires stdp)
+    arousal:          true/false
+    sign_constraint:  'hard' | 'soft' | 'none'
+}
+```
+
+### Per-neuron state
+
+```
+v               — membrane voltage (the simulated variable)
+v_th            — homeostatic threshold (adjusted by Layer 2)
+rate            — firing rate estimate (smoothed spike count over a
+                  sliding window, used by homeostasis only)
+
+Base properties (set from connectome / cell type, fixed during sim):
+    tau_m_base, v_rest_base, k_tau, k_vth, k_rest, target_rate
+
+Effective properties (base + modulation, recomputed each step):
+    tau_m_eff  = tau_m_base  * (1 - arousal * k_tau)
+    v_rest_eff = v_rest_base + modulatory_shift * k_rest
+    v_th_eff   = v_th + v_th_base - arousal * k_vth
+    (when arousal layer is off: arousal = 0, modulatory_shift = 0)
+```
+
+### Per-synapse state
+
+```
+w               — synaptic weight (learned)
+w_sign          — +1 or -1, from NT identity
+w_confidence    — 0.0 (unclear) to 1.0 (high confidence)
+eligibility     — STDP eligibility trace, decays with tau_eligibility
+theta_m         — metaplasticity: accumulated |Δw| history
+```
+
+### Neuron update (each timestep dt)
+
+```
+dv/dt = (v_rest_eff - v + R * I) / tau_m_eff
+
+if v >= v_th_eff:
+    emit spike
+    v = v_rest_base
+    enter refractory period (t_refract)
+```
+
+### Spike delivery
+
+```
+on presynaptic spike (neuron i fires, delivered to synapse i→j):
+    I_j += w_ij
+    eligibility_ij += A_plus * f(time since last postsynaptic spike)
+
+on postsynaptic spike (neuron j fires, applied to synapse i→j):
+    eligibility_ij -= A_minus * f(time since last presynaptic spike)
+
+where f() is an exponential decay with time constant tau_stdp.
+```
+
+### Layer 1: Reward-modulated STDP (periodic, every reward_dt)
+
+```
+if reward_gating:
+    delta_w = dopamine_level * eligibility
+else:
+    delta_w = eligibility
+
+if metaplasticity:
+    eta_scale = 1 / (1 + theta_m)
+    delta_w *= eta_scale
+    theta_m += |delta_w| - theta_m / tau_meta
+
+w += delta_w
+
+sign constraint enforcement:
+    'hard': clamp w to [0, +inf) if w_sign > 0, (-inf, 0] if w_sign < 0
+    'soft': allow slow drift across zero (Phase 3, epigenetic timescale)
+    'none': unconstrained
+```
+
+### Layer 2: Homeostatic threshold (periodic, slower than STDP)
+
+```
+dv_th/dt = eta_homeo * (rate - target_rate)
+(set eta_homeo = 0 to disable)
+```
+
+### Layer 4: Synaptic decay (periodic, every decay_dt)
+
+```
+w *= (1 - lambda_decay * decay_dt)
+(set lambda_decay = 0 to disable)
+```
+
+### Burn-in protocol
+
+```
+1. Drive sensory neurons with low-rate random input (~5 Hz Poisson)
+2. Enable: stdp + homeostasis + synaptic_decay (no reward_gating)
+3. Run until firing rates stabilize near target_rate
+4. Snapshot weights and thresholds as post-burn-in baseline
+5. Enable reward_gating for task-driven learning
 ```
 
 ## Initialization summary
 
-| Parameter | Initial value | Source | Notes |
-|-----------|--------------|--------|-------|
-| Topology (i→j) | Adjacency matrix | Connectome | Fixed for lifetime of simulation |
-| sign(w_ij) | From NT identity | `consensusNt` → sign map | Fixed (Dale's principle) |
-| w_ij | log(1 + synapse_count) * sign * scale | Connectome + Strategy C | Learned via reward-modulated STDP |
-| V_th | Degree-scaled from in-degree | Connectome | Learned via homeostatic plasticity + arousal modulation |
-| V_rest_base | -70 mV | Standard *Drosophila* value | Fixed base; shifted by neuromodulation |
-| V_reset | -70 mV | = V_rest_base | Fixed |
-| tau_m_base | Sensory ~5 ms, intrinsic ~10 ms, motor ~20 ms | Per superclass | Fixed base; effective value shifted by arousal |
-| t_refract | 2 ms | Standard | Fixed; caps firing at ~500 Hz |
-| R | 1 (dimensionless) | Folded into weights | Fixed |
-| k_tau, k_vth, k_rest | Per cell type, defaulting to superclass | Tunable hyperparameters | 4,206 slots; most start at superclass default, override from literature when available |
-| target_rate | TBD per superclass | Electrophysiology literature | Homeostatic set point; sensory neurons fire faster than motor neurons |
-| eta_homeo | Small (slow adaptation) | Tunable | Must be slower than STDP timescale to maintain stability |
-| tau_eligibility | ~seconds | From dopamine learning literature | Window during which reward can consolidate a weight change |
+Concrete initial values for all parameters. For design rationale and
+runtime behavior, see the [decision table](#decision-table).
+
+| Parameter | Initial value | Source |
+|-----------|--------------|--------|
+| **Topology** (i→j) | Adjacency matrix | Connectome (`adj.npy`) |
+| **sign(w_ij)** | +1 or −1 per neuron | `consensusNt` → sign map (see below). Motor neurons resolved to −1 (glutamatergic, inhibitory within CNS) |
+| **w_confidence** | 0.0–1.0 per neuron | `consensusNt` classification confidence. Motor neurons: high (known glutamatergic). Remaining "unclear": low ≈ 0 |
+| **w_ij** | `log(1 + synapse_count) × sign × confidence × scale` | Connectome + confidence weighting |
+| **V_th** | Degree-scaled from in-degree | Connectome. Higher in-degree → higher initial threshold |
+| **V_rest_base** | −70 mV | Standard *Drosophila* value |
+| **V_reset** | −70 mV (= V_rest_base) | Standard |
+| **tau_m_base** | Sensory ~5 ms · Intrinsic ~10 ms · Motor ~20 ms | Per superclass |
+| **t_refract** | 2 ms | Standard. Caps max firing at ~500 Hz |
+| **R** | 1 (dimensionless) | Folded into weight scaling |
+| **k_tau, k_vth, k_rest** | Per cell type, defaulting to superclass | Three-level fallback: k_global → superclass multiplier → cell type override. 4,206 slots |
+| **target_rate** | Sensory ~50 Hz · Intrinsic ~20 Hz · Motor ~10 Hz | Electrophysiology literature, per superclass |
+| **eta_homeo** | Small (TBD) | Tunable. Set to 0 when homeostasis layer disabled |
+| **tau_eligibility** | ~1–5 seconds | Dopamine learning literature |
+| **lambda_decay** | Small (time constant hours–days, TBD) | Tunable. Set to 0 when synaptic_decay layer disabled |
+| **theta_m** | 0.0 per synapse | Starts at zero — accumulates during simulation |
+| **tau_meta** | Minutes–hours (TBD) | Tunable |
+| **sign_constraint** | `'hard'` (Phase 1) | Config. `'hard'` / `'soft'` / `'none'` |
+
+### Sign map
+
+The preprocessing pipeline resolves `consensusNt` to a per-neuron sign
+for all outgoing connections within the CNS:
+
+| consensusNt | Sign | Notes |
+|-------------|:----:|-------|
+| Acetylcholine | +1 | Dominant excitatory NT in *Drosophila* |
+| GABA | −1 | Primary fast inhibition |
+| Glutamate | −1 | Inhibitory within the CNS (opposite of vertebrate convention) |
+| Glutamate (motor neurons) | −1 | Same rule. The 672 "unclear" motor neurons are glutamatergic — classified "unclear" by the automated pipeline because glutamate is excitatory at the neuromuscular junction (outside the CNS). Within the adjacency matrix all connections are CNS-to-CNS, so the standard CNS convention applies. Confidence set to high |
+| Unclear (non-motor) | ±1 | Low confidence, initialized near zero. Sign settles during burn-in |
+| Serotonin | 0 | Modulatory — not modeled as a signed synaptic weight |
+| Histamine | −1 | Rare in VNC (9 neurons) |
+
+### Motor neuron output
+
+Motor neurons are the final output layer of the SNN. Within the
+adjacency matrix, they are ordinary CNS neurons — they receive input
+from interneurons and descending neurons, and their glutamatergic
+connections to other CNS neurons are inhibitory (sign = −1), same as
+any other glutamatergic neuron.
+
+Their effect on muscles is **not** a synapse in the network. The
+neuromuscular junction is a separate interface between the SNN and a
+body model. When the SNN is connected to a body:
+
+- **Excitatory motor neurons** (glutamatergic): spikes → muscle
+  contraction. Glutamate is excitatory at the *Drosophila*
+  neuromuscular junction — the opposite of its CNS role.
+- **Inhibitory motor neurons** (GABAergic): spikes → muscle relaxation.
+  *Drosophila*, like other arthropods, has dedicated inhibitory motor
+  neurons that actively relax muscles — unlike vertebrates, where
+  muscles relax only when excitatory drive stops.
+- **Modulatory motor neurons** (octopaminergic): spikes → adjust muscle
+  gain and fatigue properties.
+
+This excitatory/inhibitory distinction at the muscle is a property of
+the body model's motor interface, not of the SNN's sign map. The body
+model maps each motor neuron's spike output to the appropriate muscle
+effect based on its neurotransmitter and target muscle.

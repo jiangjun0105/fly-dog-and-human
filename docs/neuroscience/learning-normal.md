@@ -420,22 +420,47 @@ signal.
 
 **The sliding threshold:**
 
-In standard STDP, there's a fixed boundary: pre-before-post strengthens,
-post-before-pre weakens. In BCM/metaplasticity, this boundary **slides**
-based on the postsynaptic neuron's recent average activity:
+In standard STDP, every synapse has the same fixed learning rate. In
+our metaplasticity formulation, each synapse tracks how much it has
+been recently modified and scales its learning rate accordingly:
 
 ```
-theta_m = f(average postsynaptic firing rate)
+theta_m_ij += |delta_w_ij| - theta_m_ij / tau_meta
 
-If firing rate is high → theta_m increases:
-  → a larger timing difference is needed to trigger LTP
-  → LTD becomes easier
-  → net effect: recent winners are harder to strengthen further
-
-If firing rate is low → theta_m decreases:
-  → even weak timing correlations can trigger LTP
-  → net effect: quiet synapses get a chance to strengthen
+eta_ij = eta_base / (1 + theta_m_ij)
 ```
+
+theta_m_ij accumulates from recent |Δw| (the absolute magnitude of
+weight changes after reward gating) and decays with time constant
+tau_meta. When theta_m_ij is high (recently modified synapse), the
+effective learning rate eta_ij drops — the synapse becomes harder to
+change further. When theta_m_ij is low (quiet synapse), eta_ij
+approaches eta_base — the synapse is fully plastic.
+
+```
+Recently modified synapse (high theta_m_ij):
+  → low eta_ij → harder to modify further in either direction
+  → must wait for theta_m_ij to decay before regaining plasticity
+
+Quiet synapse (low theta_m_ij):
+  → eta_ij ≈ eta_base → fully responsive to STDP
+  → ready to capture new associations
+```
+
+This formulation deliberately differs from the classical BCM rule,
+which slides the threshold based on postsynaptic firing rate. We use
+per-synapse |Δw| instead because postsynaptic firing rate is already
+the signal that homeostasis uses to adjust V_th (section 1e). Using
+the same signal for both mechanisms would create redundancy. Per-synapse
+|Δw| tracking gives metaplasticity its own independent input — the
+recent modification history of each individual connection — so the two
+stability mechanisms complement each other without overlap.
+
+An additional advantage: because our STDP is reward-gated (section 1c),
+the |Δw| that feeds theta_m reflects the post-gating weight change
+(eligibility × dopamine), not raw spike timing coincidences. This means
+metaplasticity dampens synapses that are actually being modified by the
+learning system, not just synapses that happen to see correlated spikes.
 
 **Biological function:** Metaplasticity solves a different problem than
 homeostasis. Homeostasis adjusts the neuron's overall excitability (the
@@ -459,29 +484,31 @@ for future learning.
 | Property | Homeostatic plasticity | Metaplasticity |
 |----------|----------------------|----------------|
 | Operates on | The whole neuron (global) | Individual synapses (local) |
+| Signal | Postsynaptic firing rate | Per-synapse |Δw| history |
 | Adjusts | Excitability (V_th) or all weights uniformly | STDP learning rate per synapse |
 | Prevents | Runaway network activity | Runaway individual weight growth |
 | Timescale | Hours (gene expression) | Minutes–hours (protein modification) |
 | Analogy | Thermostat (adjusts room temperature) | Thermostat per radiator (adjusts each heater independently) |
 
 Both are needed: homeostasis for network-level stability, metaplasticity
-for synapse-level stability.
+for synapse-level stability. They use different input signals (firing
+rate vs modification history), so neither makes the other redundant.
 
-**Implementation:** A per-synapse sliding threshold that modifies the
-STDP update rule:
+**Implementation:** A per-synapse modification threshold that scales the
+STDP learning rate:
 
 ```
-theta_m_ij = running average of recent w_ij changes
+theta_m_ij += |delta_w_ij| - theta_m_ij / tau_meta
+eta_ij = eta_base / (1 + theta_m_ij)
 
-STDP update becomes:
-    if pre-before-post AND delta_w > theta_m_ij:  strengthen
-    if post-before-pre OR delta_w < theta_m_ij:   weaken
+STDP update:
+    delta_w_ij = eta_ij * stdp_update(pre, post timing)
 ```
 
-**Implementation priority:** Phase 1. Simple to implement (one extra
-variable per synapse), prevents STDP weight saturation, and
-complementary to homeostasis — homeostasis keeps firing rates stable,
-metaplasticity keeps individual weights in a useful range.
+**Implementation priority:** Phase 1. One extra float per synapse
+(theta_m_ij), prevents STDP weight saturation, and complementary to
+homeostasis — homeostasis keeps firing rates stable, metaplasticity
+keeps individual weights in a useful range.
 
 ## Acknowledged simplifications
 

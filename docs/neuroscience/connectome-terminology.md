@@ -259,8 +259,23 @@ In the top-100 sample, all three columns agree for **94%** of neurons.
 The remaining ~6% disagreement is concentrated in low-confidence
 neurons and motor neurons.
 
-**Motor neuron caveat:** 672 of 702 motor neurons are classified as
-"unclear" because they use glutamate as an **excitatory** transmitter at
-the neuromuscular junction (like vertebrates), which conflicts with the
-CNS convention where glutamate is inhibitory. The automated classifier
-flags this ambiguity.
+**Motor neuron resolution:** 672 of 702 motor neurons are classified as
+"unclear" by the automated pipeline because they use glutamate, which
+has opposite effects depending on context: **inhibitory** within the CNS
+(the *Drosophila* convention) but **excitatory** at the neuromuscular
+junction (like vertebrates). The classifier cannot resolve this
+ambiguity because it doesn't distinguish target types.
+
+For the spiking model, this is resolved in the preprocessing pipeline:
+all connections in the adjacency matrix are CNS-to-CNS, so motor neuron
+glutamate connections get sign = −1 (inhibitory), same as all other
+glutamatergic CNS neurons. Their excitatory effect on muscles is handled
+separately by the body model's motor interface — it is not a synapse
+in the network. See [LIF model design](lif-model-design.md#sign-map)
+for the full sign map and [motor neuron output](lif-model-design.md#motor-neuron-output)
+for how motor neurons interface with the body.
+
+*Drosophila* also has dedicated **inhibitory motor neurons** (GABAergic,
+~30 of the 702) that actively relax muscles, and **modulatory motor
+neurons** (octopaminergic) that adjust muscle gain — unlike vertebrates,
+where all motor neurons at the neuromuscular junction are excitatory.
