@@ -9,12 +9,13 @@ Usage:
 
 import streamlit as st
 
-from wiki.pages import data_analysis, strategies
+from wiki.pages import data_analysis, reference, strategies
 from wiki.theme import setup_plotly_theme
 
 PAGES = [
     st.Page(data_analysis.render, title="Data Analysis", icon=":material/analytics:", url_path="data-analysis"),
     st.Page(strategies.render, title="Parameter Strategies", icon=":material/tune:", url_path="strategies"),
+    st.Page(reference.render, title="Reference", icon=":material/menu_book:", url_path="reference"),
 ]
 
 
