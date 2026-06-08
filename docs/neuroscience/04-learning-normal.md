@@ -5,7 +5,7 @@ foraging, navigating, acquiring skills. The neural scaffold (topology,
 cell types, receptor profiles) is stable; only weights and thresholds
 adapt.
 
-Part of the [Learning Strategies](learning-strategies.md) series.
+Part of the [Learning Strategies](03-learning-strategies.md) series.
 
 ## Burn-in: bootstrapping a connectome that never developed
 
@@ -27,11 +27,6 @@ Biological development (what nature does):
   Neurons born gradually → fire spontaneously →
   activity shapes wiring AS IT FORMS → topology and
   weights co-develop → always functional at each stage
-
-Adding neurons to a trained network (adult neurogenesis):
-  Existing network is functional → new neuron inserted →
-  has no meaningful connections → must integrate into an
-  already-optimized system without breaking it
 
 Our Phase 1 (connectome import):
   Full adult topology arrives pre-built → weights initialized
@@ -56,45 +51,16 @@ The burn-in should:
 Only after burn-in is the network ready for task-driven learning
 (reward-modulated STDP with environmental interaction).
 
-For Phase 3 (cross-generational learning), the burn-in evolves into a
+For Phase 4 (cross-generational learning), the burn-in evolves into a
 full **developmental simulation** — see
-[cross-generational learning](learning-cross-generational.md) section
+[cross-generational learning](07-learning-cross-generational.md) section
 3d for why this distinction matters.
 
 **Implementation priority:** Phase 1. Required before any meaningful
 simulation — without burn-in, the network starts in an arbitrary state
 that may be far from any stable operating point.
 
-## 1a. Short-term synaptic dynamics (ms–seconds)
-
-**What changes:** The effective strength of a synapse on a per-spike
-basis, without any lasting structural change.
-
-**Mechanisms:**
-
-- **Short-term facilitation (STF)** — repeated presynaptic spikes
-  cause progressively more neurotransmitter release. The second spike
-  in a burst is stronger than the first. This happens because residual
-  calcium accumulates in the presynaptic terminal.
-- **Short-term depression (STD)** — the opposite: repeated spikes
-  deplete available vesicles, making each successive spike weaker until
-  the pool recovers.
-
-**Biological function:** These are automatic, biophysical processes —
-not "learning" in the cognitive sense. They act as temporal filters:
-facilitating synapses are sensitive to bursts, depressing synapses are
-sensitive to isolated spikes. Together they shape how information flows
-through a circuit moment-to-moment.
-
-**Model parameter:** Not a weight change — implemented as a dynamic
-scaling factor on w_ij that decays back to 1.0 between spikes.
-
-**Implementation priority:** Phase 2. Not critical for first simulation
-but important for realistic temporal dynamics (e.g., central pattern
-generators that produce rhythmic leg movement need STD to alternate
-between leg phases).
-
-## 1b. Spike-timing-dependent plasticity — STDP (seconds–minutes)
+## 1a. Spike-timing-dependent plasticity — STDP (seconds–minutes)
 
 **What changes:** Synaptic weight magnitudes (w_ij). The core learning
 rule.
@@ -119,13 +85,13 @@ This is the neural basis of associative learning and skill acquisition.
 regardless of whether they're useful. A fly touching a hot surface and
 then withdrawing its leg would strengthen the touch→withdraw pathway,
 but so would any other coincidental pairing. STDP needs reward gating
-(see 1c) to learn selectively.
+(see 1b) to learn selectively.
 
 **Model parameter:** Changes w_ij magnitude. Sign is not changed by
-STDP in normal conditions (see [under-pressure learning](learning-under-pressure.md)
+STDP in normal conditions (see [under-pressure learning](06-learning-under-pressure.md)
 for sign changes).
 
-## 1c. Reward-modulated learning — dopamine gating (seconds–minutes)
+## 1b. Reward-modulated learning — dopamine gating (seconds–minutes)
 
 **What changes:** Which STDP weight changes become permanent.
 
@@ -171,7 +137,7 @@ converges on an efficient motor program — a learned skill.
 **Implementation priority:** Phase 1. This is the primary learning
 mechanism and should be in the first simulation.
 
-## 1d. Synaptic decay — "use it or lose it" (hours–days)
+## 1c. Synaptic decay — "use it or lose it" (hours–days)
 
 **What changes:** All synaptic weights, continuously and uniformly.
 Weights that aren't actively reinforced decay toward zero.
@@ -261,7 +227,7 @@ be evolved.
 timestep), critical for preventing weight saturation during long
 learning runs.
 
-## 1e. Homeostatic plasticity (minutes–hours)
+## 1d. Homeostatic plasticity (minutes–hours)
 
 **What changes:** Firing thresholds (V_th) and synaptic scaling of
 incoming weights.
@@ -339,10 +305,9 @@ too high? sunny day? oven open?), homeostatic plasticity doesn't care
 neuromodulation?). It adjusts excitability to bring the rate back toward
 the set point.
 
-### Two forms of homeostatic plasticity
+### Threshold adjustment (intrinsic plasticity)
 
-**1. Threshold adjustment (intrinsic plasticity)** — the neuron adjusts
-its own firing threshold:
+The neuron adjusts its own firing threshold:
 
 ```
 dV_th/dt = eta_homeo * (firing_rate - target_rate)
@@ -352,21 +317,7 @@ Firing too little → lower V_th → need less input to fire
 ```
 
 This changes the neuron's overall excitability uniformly — all inputs
-are affected equally. Simpler to implement but cruder.
-
-**2. Synaptic scaling** — the neuron scales ALL of its incoming weights
-up or down by the same multiplicative factor:
-
-```
-Firing too much → scale all incoming w_ij by 0.95x
-Firing too little → scale all incoming w_ij by 1.05x
-```
-
-This preserves the **relative** pattern of weights — the structure that
-STDP learned. A connection that's 3x stronger than its neighbor stays
-3x stronger after scaling; only the absolute magnitudes change. This is
-important because it doesn't destroy what STDP learned, it just adjusts
-the volume knob.
+are affected equally.
 
 ### Why the timescale matters
 
@@ -385,130 +336,39 @@ to a sustainable level.
 The result: the network can learn and change moment-to-moment, while
 remaining globally stable over longer periods.
 
-**Implementation priority:** Phase 1, in two steps. Threshold
-adjustment first (simpler, one variable per neuron). Synaptic scaling
-in Phase 2 (more biologically faithful, preserves learned weight
-ratios).
+**Implementation priority:** Phase 1. One variable per neuron (V_th).
 
-## 1f. Metaplasticity — "plasticity of plasticity" (minutes–hours)
+## 1e. Short-term synaptic dynamics (ms–seconds)
 
-**What changes:** The learning rate of individual synapses — how
-responsive each synapse is to future STDP events.
+**What changes:** The effective strength of a synapse on a per-spike
+basis, without any lasting structural change.
 
-**Mechanism:** The history of a synapse's activity changes how plastic
-it is going forward. This is the BCM (Bienenstock-Cooper-Munro) theory.
-Each synapse tracks its recent modification history and adjusts its
-STDP sensitivity accordingly:
+**Mechanisms:**
 
-```
-Synapse recently strengthened (LTP):
-  → becomes harder to strengthen further
-  → becomes easier to weaken
-  → the "modification threshold" slides upward
+- **Short-term facilitation (STF)** — repeated presynaptic spikes
+  cause progressively more neurotransmitter release. The second spike
+  in a burst is stronger than the first. This happens because residual
+  calcium accumulates in the presynaptic terminal.
+- **Short-term depression (STD)** — the opposite: repeated spikes
+  deplete available vesicles, making each successive spike weaker until
+  the pool recovers.
 
-Synapse recently weakened (LTD):
-  → becomes harder to weaken further
-  → becomes easier to strengthen
-  → the "modification threshold" slides downward
-```
+**Biological function:** These are automatic, biophysical processes —
+not "learning" in the cognitive sense. They act as temporal filters:
+facilitating synapses are sensitive to bursts, depressing synapses are
+sensitive to isolated spikes. Together they shape how information flows
+through a circuit moment-to-moment.
 
-The molecular mechanism involves the recent history of calcium influx
-and the phosphorylation state of plasticity-related proteins (CaMKII,
-calcineurin). A synapse that just underwent LTP has a different
-biochemical state that makes the next LTP event require a stronger
-signal.
+**Why Phase 1 needs this:** Central pattern generators (CPGs) that
+produce rhythmic leg movement depend on STD to alternate between leg
+phases. Without temporal filtering, the network cannot generate the
+rhythmic output needed for basic locomotion — the primary Phase 1 goal.
 
-**The sliding threshold:**
+**Model parameter:** Not a weight change — implemented as a dynamic
+scaling factor on w_ij that decays back to 1.0 between spikes.
 
-In standard STDP, every synapse has the same fixed learning rate. In
-our metaplasticity formulation, each synapse tracks how much it has
-been recently modified and scales its learning rate accordingly:
-
-```
-theta_m_ij += |delta_w_ij| - theta_m_ij / tau_meta
-
-eta_ij = eta_base / (1 + theta_m_ij)
-```
-
-theta_m_ij accumulates from recent |Δw| (the absolute magnitude of
-weight changes after reward gating) and decays with time constant
-tau_meta. When theta_m_ij is high (recently modified synapse), the
-effective learning rate eta_ij drops — the synapse becomes harder to
-change further. When theta_m_ij is low (quiet synapse), eta_ij
-approaches eta_base — the synapse is fully plastic.
-
-```
-Recently modified synapse (high theta_m_ij):
-  → low eta_ij → harder to modify further in either direction
-  → must wait for theta_m_ij to decay before regaining plasticity
-
-Quiet synapse (low theta_m_ij):
-  → eta_ij ≈ eta_base → fully responsive to STDP
-  → ready to capture new associations
-```
-
-This formulation deliberately differs from the classical BCM rule,
-which slides the threshold based on postsynaptic firing rate. We use
-per-synapse |Δw| instead because postsynaptic firing rate is already
-the signal that homeostasis uses to adjust V_th (section 1e). Using
-the same signal for both mechanisms would create redundancy. Per-synapse
-|Δw| tracking gives metaplasticity its own independent input — the
-recent modification history of each individual connection — so the two
-stability mechanisms complement each other without overlap.
-
-An additional advantage: because our STDP is reward-gated (section 1c),
-the |Δw| that feeds theta_m reflects the post-gating weight change
-(eligibility × dopamine), not raw spike timing coincidences. This means
-metaplasticity dampens synapses that are actually being modified by the
-learning system, not just synapses that happen to see correlated spikes.
-
-**Biological function:** Metaplasticity solves a different problem than
-homeostasis. Homeostasis adjusts the neuron's overall excitability (the
-volume knob). Metaplasticity adjusts how changeable each individual
-synapse is (the learning rate per synapse).
-
-Without metaplasticity, STDP tends to produce a bimodal weight
-distribution — all weights get pushed to maximum or minimum over time,
-because strong synapses drive more postsynaptic firing, which creates
-more pre-before-post coincidences, which strengthens them further. This
-is the "rich get richer" problem at the single-synapse level.
-
-Metaplasticity prevents this by making recently strengthened synapses
-harder to strengthen again and recently weakened ones harder to weaken
-further. The result: weights stay in a useful middle range where they
-can still change in either direction, preserving the network's capacity
-for future learning.
-
-**Comparison with homeostasis:**
-
-| Property | Homeostatic plasticity | Metaplasticity |
-|----------|----------------------|----------------|
-| Operates on | The whole neuron (global) | Individual synapses (local) |
-| Signal | Postsynaptic firing rate | Per-synapse |Δw| history |
-| Adjusts | Excitability (V_th) or all weights uniformly | STDP learning rate per synapse |
-| Prevents | Runaway network activity | Runaway individual weight growth |
-| Timescale | Hours (gene expression) | Minutes–hours (protein modification) |
-| Analogy | Thermostat (adjusts room temperature) | Thermostat per radiator (adjusts each heater independently) |
-
-Both are needed: homeostasis for network-level stability, metaplasticity
-for synapse-level stability. They use different input signals (firing
-rate vs modification history), so neither makes the other redundant.
-
-**Implementation:** A per-synapse modification threshold that scales the
-STDP learning rate:
-
-```
-theta_m_ij += |delta_w_ij| - theta_m_ij / tau_meta
-eta_ij = eta_base / (1 + theta_m_ij)
-
-STDP update:
-    delta_w_ij = eta_ij * stdp_update(pre, post timing)
-```
-
-**Implementation priority:** Phase 1. One extra float per synapse
-(theta_m_ij), prevents STDP weight saturation, and complementary to
-homeostasis — homeostasis keeps firing rates stable, metaplasticity
-keeps individual weights in a useful range.
+**Implementation priority:** Phase 1. Required for CPG-driven motor
+control.
 
 ## Acknowledged simplifications
 
@@ -630,107 +490,6 @@ the number of compartments per neuron (typically 10–100x more expensive).
 
 **Priority:** Phase 3 or beyond, and likely only for specific neurons
 where dendritic computation is functionally critical.
-
-### Synaptic tagging and capture (memory consolidation)
-
-STDP creates an initial weight change (early-phase LTP/LTD), but this
-change is **temporary** — it depends on short-lived biochemical
-modifications (phosphorylation) that last ~1–3 hours. For a weight
-change to become permanent (late-phase LTP/LTD), new protein synthesis
-is required.
-
-The mechanism has two steps:
-
-1. **Tagging** — an active synapse gets a molecular "tag" (a
-   temporary biochemical marker) when STDP modifies it. The tag itself
-   doesn't stabilize the weight change — it just marks the synapse as
-   "recently modified."
-
-2. **Capture** — when a strong learning event triggers protein
-   synthesis in the neuron's cell body (a costly, neuron-wide process),
-   the newly synthesized plasticity-related proteins (PRPs) are shipped
-   out along dendrites. Tagged synapses **capture** these proteins and
-   use them to stabilize their weight changes. Untagged synapses don't
-   capture PRPs, so their changes fade.
-
-```
-Weak learning event:
-  → STDP changes weight (early-phase)
-  → synapse gets tagged
-  → if no protein synthesis within ~1–3 hours → tag expires
-  → weight change fades (forgotten)
-
-Strong learning event:
-  → STDP changes weight (early-phase)
-  → synapse gets tagged
-  → strong signal triggers protein synthesis (neuron-wide)
-  → tagged synapses capture PRPs → weight change stabilized (permanent)
-  → nearby tagged synapses also capture PRPs → "synaptic clustering"
-```
-
-**Biological function:** This explains several memory phenomena:
-- **Why cramming is less effective than spaced repetition** — spaced
-  learning events each trigger tagging and protein synthesis; cramming
-  triggers tagging but the tags expire before enough protein synthesis
-  occurs
-- **Why sleep matters for memory** — during sleep, replay of recent
-  activity patterns retriggers protein synthesis and consolidates tagged
-  synapses
-- **Why emotionally significant events are remembered better** — strong
-  dopamine/norepinephrine signals during emotional events trigger more
-  protein synthesis, consolidating more tags
-
-**Impact on our model:** Without tagging and capture, all STDP weight
-changes are treated equally — there's no distinction between fragile
-recent memories and consolidated long-term memories. In long-running
-simulations, this means old memories are as vulnerable to decay as new
-ones.
-
-**Implementation difficulty:** Moderate. Requires per-synapse tag
-variables, a neuron-level protein synthesis signal, and a consolidation
-mechanism that converts tagged early-phase changes to permanent
-late-phase changes.
-
-**Priority:** Phase 2, when we add sleep/wake cycles and want realistic
-memory consolidation dynamics.
-
-### Oscillatory gating and sleep
-
-Neural oscillations — rhythmic, population-level activity patterns —
-gate when and how effectively plasticity occurs. The brain doesn't learn
-uniformly at all times; it cycles between states that favor learning,
-consolidation, and maintenance.
-
-Key oscillatory states in *Drosophila*:
-
-- **Circadian rhythms** — flies learn better at certain times of day.
-  Clock neurons (which use gap junctions for synchronization) modulate
-  global arousal and plasticity, with peak learning during subjective
-  daytime
-- **Sleep** — *Drosophila* has genuine sleep (consolidated rest periods
-  with reduced responsiveness and homeostatic rebound). During sleep:
-  - Recently active circuits are replayed (reactivation)
-  - Synaptic tagging and capture consolidates the day's learning
-  - Global synaptic downscaling occurs — all weights are slightly
-    reduced, improving signal-to-noise ratio (the "synaptic homeostasis
-    hypothesis")
-- **Gamma-like oscillations** — fast oscillations (~20–50 Hz) in the
-  mushroom body synchronize KC activity during odor processing, creating
-  temporal windows where STDP is particularly effective
-
-**Impact on our model:** Without oscillatory gating, our model learns
-continuously at a uniform rate. It has no concept of "now is a good time
-to learn" vs "now is a good time to consolidate." This means it may
-learn more slowly than biology (because biology concentrates learning
-into optimal windows) and consolidate less effectively (because it
-doesn't have sleep-dependent cleanup).
-
-**Implementation difficulty:** Moderate for basic sleep/wake cycling.
-High for realistic oscillatory dynamics within brain regions.
-
-**Priority:** Phase 2 for sleep/wake cycling (global synaptic
-downscaling during sleep, replay-driven consolidation). Phase 3 for
-oscillatory gating within circuits.
 
 ### Glial cell modulation
 

@@ -6,7 +6,7 @@ be sufficient. The fly needs to change not just *how strongly*
 connections operate but potentially *how they operate at all*. These
 mechanisms modify parameters that are normally stable.
 
-Part of the [Learning Strategies](learning-strategies.md) series.
+Part of the [Learning Strategies](03-learning-strategies.md) series.
 
 ## 2a. Neuromodulatory state switching (seconds–minutes)
 
@@ -35,7 +35,7 @@ new escape route; it needs its existing escape circuits to be faster and
 more sensitive.
 
 **Model parameter:** Modulates tau_m_eff, V_th_eff, V_rest_eff via
-the k coupling constants (see [LIF model design](lif-model-design.md)).
+the k coupling constants (see [LIF model design](02-lif-model-design.md)).
 
 **Implementation priority:** Phase 1. The arousal system is important
 even for basic locomotion — the transition from standing to walking
@@ -176,7 +176,7 @@ associative pairing (no STDP, no reward signal):
   leads to decreased response. A fly stops reacting to repeated gentle
   air puffs. The mechanism is vesicle depletion and reduced release
   probability at specific synapses — mechanistically related to
-  short-term depression (STD, section 1a in [normal learning](learning-normal.md))
+  short-term depression (STD, section 1e in [normal learning](04-learning-normal.md))
   but operating on longer timescales and with molecular consolidation.
 
 These are distinct from STDP because they modify the *gain* of entire
@@ -310,7 +310,7 @@ and learning through insulin/adipokinetic hormone (AKH) signaling:
   learns better when hungry.
 - **dNPF/NPF (fly NPY):** Neuropeptide F signals motivational state
   and modulates dopaminergic neuron activity, changing the reward
-  signal that gates STDP (section 1c in [normal learning](learning-normal.md)).
+  signal that gates STDP (section 1b in [normal learning](04-learning-normal.md)).
 
 **Impact on our model:** Without metabolic state modulation, our model's
 learning rate is constant regardless of the simulated organism's energy
@@ -389,7 +389,7 @@ Potentially relevant for disease modeling.
 
 ### Rapid homeostatic plasticity
 
-Section 1e in [normal learning](learning-normal.md) describes
+Section 1d in [normal learning](04-learning-normal.md) describes
 homeostatic plasticity operating on an hours timescale via gene
 expression. Under extreme perturbation — sudden loss of a major input,
 pharmacological blockade, or acute injury — a faster mode of homeostatic
@@ -436,7 +436,7 @@ can be enhanced through large-scale circuit rebalancing. In *Drosophila*:
 - **Antennal ablation** (removing olfactory input) leads to enhanced
   visual and mechanosensory responses in downstream circuits.
 - The mechanism involves both homeostatic upregulation of remaining
-  inputs (the silent neurons become more excitable, section 1e) and
+  inputs (the silent neurons become more excitable, section 1d) and
   structural plasticity (section 2c) where new connections form from
   remaining sensory pathways to the deprived target circuits.
 

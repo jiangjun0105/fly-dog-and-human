@@ -271,8 +271,8 @@ all connections in the adjacency matrix are CNS-to-CNS, so motor neuron
 glutamate connections get sign = −1 (inhibitory), same as all other
 glutamatergic CNS neurons. Their excitatory effect on muscles is handled
 separately by the body model's motor interface — it is not a synapse
-in the network. See [LIF model design](lif-model-design.md#sign-map)
-for the full sign map and [motor neuron output](lif-model-design.md#motor-neuron-output)
+in the network. See [LIF model design](02-lif-model-design.md#sign-map)
+for the full sign map and [motor neuron output](02-lif-model-design.md#motor-neuron-output)
 for how motor neurons interface with the body.
 
 *Drosophila* also has dedicated **inhibitory motor neurons** (GABAergic,

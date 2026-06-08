@@ -4,7 +4,7 @@ Design reference for the Leaky Integrate-and-Fire (LIF) spiking neuron
 model used in the Digital Drosophila project. Covers the mathematical
 foundation, all parameters, neuromodulation, learning rules, and how
 the connectome data maps into each. For the implementation timeline, see
-[implementation phases](implementation-phases.md).
+[implementation phases](08-implementation-phases.md).
 
 ## The membrane equation
 
@@ -347,7 +347,7 @@ timescale) can shift receptor profiles, allowing effective signs to
 change. This models postsynaptic receptor switching — the presynaptic
 neuron still releases the same transmitter, but the postsynaptic
 response can change polarity. See
-[under-pressure learning](learning-under-pressure.md) section 2b.
+[under-pressure learning](06-learning-under-pressure.md) section 2b.
 
 **Topology — fixed, never learned:** The physical wiring of the fly's
 nervous system is established during development and does not rewire on
@@ -377,7 +377,7 @@ Burn-in protocol:
 Only after burn-in is the network ready for task-driven learning
 (enable reward_gating, present structured stimuli). The burn-in serves
 the same function as developmental spontaneous activity in biology —
-see [normal learning](learning-normal.md) for detailed rationale.
+see [normal learning](04-learning-normal.md) for detailed rationale.
 
 **Configurable:** `burn_in: True/False`. When False, the simulation
 starts directly from connectome-initialized weights (useful for testing
@@ -432,7 +432,9 @@ Phase 2, a second form of homeostasis is added: multiplicative scaling
 of all incoming weights. Scaling preserves the relative weight ratios
 that STDP learned while adjusting absolute magnitudes, making it less
 destructive to learned structure. See
-[normal learning](learning-normal.md) section 1e for details.
+[normal learning](04-learning-normal.md) section 1d for threshold
+adjustment, and [memory consolidation](05-learning-memory-consolidation.md)
+section 2b for synaptic scaling.
 
 ### Layer 3: Global state modulation (arousal)
 
@@ -493,7 +495,7 @@ counteract this, but whether they're sufficient is an empirical
 question. Watch for: growing fraction of near-zero weights over time,
 especially during long burn-in runs.
 
-See [normal learning](learning-normal.md) section 1d for full biological
+See [normal learning](04-learning-normal.md) section 1c for full biological
 rationale.
 
 ### Layer 5: Metaplasticity — BCM sliding threshold (minutes–hours)
@@ -528,8 +530,8 @@ by making recently strengthened synapses harder to strengthen further.
 use the same fixed STDP learning rate. Useful for comparing network
 dynamics with and without per-synapse rate modulation.
 
-See [normal learning](learning-normal.md) section 1f for full biological
-rationale.
+See [memory consolidation](05-learning-memory-consolidation.md) section 2b
+for full biological rationale.
 
 ### Layer interaction summary
 

@@ -36,7 +36,7 @@ More synapses generally means stronger influence. The adjacency matrix
 
 On top of that, each individual presynaptic T-bar is **polyadic** — it
 broadcasts to ~7 postsynaptic partners simultaneously (see
-[connectome-terminology.md](connectome-terminology.md#why-there-are-7x-more-postsynapses-than-presynapses)).
+[connectome-terminology.md](01-connectome-terminology.md#why-there-are-7x-more-postsynapses-than-presynapses)).
 
 So the many-to-many structure is nested:
 

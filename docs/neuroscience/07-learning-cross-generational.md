@@ -3,7 +3,7 @@
 This is the outer optimization loop — not simulated within a single
 fly's lifetime but across many generations.
 
-Part of the [Learning Strategies](learning-strategies.md) series.
+Part of the [Learning Strategies](03-learning-strategies.md) series.
 
 ## 3a. Genetic evolution (many generations)
 
@@ -79,7 +79,7 @@ accumulated knowledge in the form of:
   an environment change, a previously useful skill should be dormant
   and reactivatable, not erased. This is analogous to how epigenetic
   presets work within a lifetime (section 2b in
-  [under-pressure learning](learning-under-pressure.md)) but encoded
+  [under-pressure learning](06-learning-under-pressure.md)) but encoded
   at the genetic level
 - **Tuned learning rules** — STDP parameters, homeostatic set points,
   and modulatory coupling constants that make the offspring's circuits
@@ -124,7 +124,7 @@ Epigenetic marks — DNA methylation patterns, histone modifications,
 small RNA profiles — can be passed from parent to offspring **without
 any change to the DNA sequence**. This is the bridge between
 within-lifetime epigenetic regulation (section 2b in
-[under-pressure learning](learning-under-pressure.md)) and genetic
+[under-pressure learning](06-learning-under-pressure.md)) and genetic
 evolution (section 3a): faster than waiting for random mutations, but
 still heritable.
 
@@ -318,7 +318,7 @@ diversity makes the population more robust to environmental variation.
 
 ### Relationship to Phase 1 burn-in
 
-The burn-in period described in [normal learning](learning-normal.md)
+The burn-in period described in [normal learning](04-learning-normal.md)
 is our Phase 1 approximation of developmental spontaneous activity.
 It's a simplification — burn-in can only adjust weights and thresholds
 on a fixed topology, while real development co-optimizes both. But for
@@ -469,7 +469,7 @@ Concretely, the DNA file would define:
 1. **Neuron type specifications** — how many distinct neuron types exist,
    along with the fixed or predefined parameters for each type. These
    parameters include the size and coefficients of the
-   [LIF equation](lif-model-design.md) (tau_m, V_rest, V_thresh,
+   [LIF equation](02-lif-model-design.md) (tau_m, V_rest, V_thresh,
    refractory period, etc.) that govern each type's electrical behavior.
 
 2. **Connectivity rules** — the number of neurons per type and the
