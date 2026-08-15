@@ -28,3 +28,6 @@ wheels/
 
 # GeNN build artifacts
 *_CODE/
+
+# Generated reports/plots
+reports/

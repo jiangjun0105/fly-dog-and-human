@@ -15,6 +15,7 @@ dependencies = [
     "pygenn @ https://github.com/genn-team/genn/archive/refs/tags/5.4.0.zip",
     "streamlit>=1.45",
     "joblib>=1.4",
+    "matplotlib>=3.9",
 ]
 
 [build-system]
