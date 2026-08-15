@@ -1,49 +1,56 @@
-# Learning & Locomotion Experiments
+# EPIC — Learning & Locomotion Experiments
+
+**EPIC — container, do not execute; work lives in child issues.**
 
 **Parent:** epic-phase1-implementation
-**Depends on:** child3-sensorimotor-loop
+**Depends on:** epic3-sensorimotor-loop
 
-## Desired Behavior
+## Epic Demo
 
-Implement Phase 1 learning rules and demonstrate that the biologically-constrained network can
-learn locomotion through localized plasticity. Compare against a random-topology control to test
-the core hypothesis: form follows function.
+Run a training experiment: the fly starts twitching randomly (from Epic 3), applies
+reward-modulated STDP with forward velocity as reward, and after N episodes produces
+recognizable forward locomotion. A random-topology control learns slower, demonstrating
+that biological connectivity structure accelerates learning.
 
-### Demo
+## Children (value-sliced: skateboard → bicycle → car)
 
-Run a training experiment that:
-1. Starts with the closed-loop simulation from Child 3 (fly initially twitches randomly)
-2. Applies reward-modulated STDP with forward velocity as reward signal
-3. After N training episodes, the fly produces coordinated forward locomotion
-4. A control network (same neuron count, random connectivity, same learning rules) learns slower or fails to learn
-5. Output: learning curve (reward vs. episode) for biological vs. random topology, plus before/after videos
+1. **[Skateboard — Reward-modulated STDP on closed loop](2026-08-15-learning-stdp-reward.md)**: Three-factor STDP (pre-post timing × eligibility × dopamine), reward = forward velocity. Fly learns *something* — any improvement over random baseline.
+2. **[Bicycle — Full Phase 1 plasticity + training harness](2026-08-15-learning-full-plasticity.md)**: Add homeostatic plasticity (threshold adaptation), synaptic decay (use-it-or-lose-it), episode structure with logging. The fly produces recognizable forward movement.
+3. **[Car — Controlled experiment: biological vs random topology](2026-08-15-learning-experiment.md)**: Random-topology control network (same parameters, scrambled wiring), statistical comparison, learning curves, gait analysis. Answers the research question.
 
-### Tasks (estimated)
+## Dependency Spine
 
-1. **STDP implementation** — Three-factor STDP in Brian2: pre-post timing → eligibility trace → dopamine gate. Parameters from doc 04 (tau_eligibility ~1-5s, causal window ~20ms) (~2 tasks)
-2. **Reward signal** — Extract forward velocity from MuJoCo body state. Define reward function: `r = v_forward - penalty_for_falling`. Implement dopamine signal broadcast to eligible synapses (~1 task)
-3. **Homeostatic plasticity** — Threshold adaptation: `dV_th/dt = eta_homeo * (firing_rate - target_rate)`. Prevents network silence or seizure during learning (~1 task)
-4. **Synaptic decay** — Use-it-or-lose-it: inactive synapses fade toward zero with `lambda_decay`. Prunes unused connections (~1 task)
-5. **Training loop** — Episode structure: reset fly position, run for T seconds, accumulate reward, update eligibility-gated weights. Log metrics per episode (~1-2 tasks)
-6. **Random-topology control** — Generate a control network: same neuron count, same degree distribution, random wiring (destroying biological topology). Same learning rules. Provides the experimental comparison (~1 task)
-7. **Analysis & visualization** — Learning curves, weight evolution histograms, gait analysis (leg coordination patterns), statistical comparison (biological vs. random, N runs) (~1-2 tasks)
+```
+Issue 4.1 (STDP + reward) → Issue 4.2 (full plasticity + harness) → Issue 4.3 (experiment)
+```
 
-### Key References
+Linear — each thickens the learning capability. All depend on Epic 3 (closed loop) being functional.
+
+## Key Design Decisions
+
+- **Three-factor STDP**: pre-post timing → eligibility trace (tau ~1-5s) → dopamine gate. From doc 04.
+- **Reward signal**: `r = v_forward - penalty_for_falling`. Start simple, add shaping only if learning fails.
+- **Homeostatic plasticity**: `dV_th/dt = eta_homeo * (firing_rate - target_rate)`. Prevents runaway excitation or silence during learning.
+- **Synaptic decay**: `dw/dt = -lambda_decay * w` for inactive synapses. Prunes unused connections.
+- **Episode structure**: Reset fly position, run T seconds (start with 5-10s), accumulate reward, update eligibility-gated weights.
+- **Control**: Same neuron count, same degree distribution, random wiring. Same learning rules. Only topology differs.
+
+## Success Criteria
+
+1. Biological-topology network produces recognizable forward locomotion (fly moves forward without falling)
+2. Learning curve shows improvement over episodes (not flat)
+3. Biological topology outperforms random topology on at least one metric (faster learning, higher final reward, or more stable gait)
+
+## Key References
 
 - `docs/neuroscience/04-learning-normal.md` — STDP, reward modulation, homeostasis, decay
 - `docs/neuroscience/03-learning-strategies.md` — timescale hierarchy
-- `docs/neuroscience/08-implementation-phases.md` — Phase 1 parameter matrix (what's learned vs. fixed)
-- `docs/long-term-plan.md` — core hypothesis: biological topology learns faster
+- `docs/neuroscience/08-implementation-phases.md` — Phase 1 parameter matrix
+- `docs/neuroscience/05-stf-std.md` — short-term facilitation/depression (include in Phase 1 per doc 08)
 
-### Open Questions
+## Open Questions
 
-- Episode length? Recommend: start with 5-10s simulated time, adjust based on whether anything emerges.
-- How many episodes before we expect learning? Unknown — this is the experiment. Budget for hundreds, hope for tens.
-- Should STF/STD (short-term facilitation/depression) be in this child or Phase 2? Doc 08 lists them as Phase 1. Recommend: include as they help CPG rhythm generation.
-- Reward shaping? Pure forward velocity may be too sparse. Consider intermediate rewards (e.g., leg movement, not falling). Recommend: start simple, add shaping only if learning fails.
-
-### Success Criteria
-
-1. The biological-topology network produces recognizable forward locomotion (fly moves forward without falling, even if gait is imperfect)
-2. Learning curve shows improvement over episodes (not flat)
-3. Biological topology outperforms random topology on at least one metric (faster learning, higher final reward, or more stable gait)
+- Episode length? Start with 5-10s, adjust based on emergence.
+- How many episodes to learn? Budget for hundreds, hope for tens.
+- Include STF/STD? Doc 08 lists them as Phase 1 — recommended, as they help CPG rhythm generation.
+- Reward shaping? Start pure forward velocity; add shaping only if learning is too slow.

@@ -2,7 +2,7 @@
 id: 2026-08-15-refactor-scripts-to-package
 title: "Refactor Brian2 simulation scripts into digital_drosophila package modules"
 created: 2026-08-15T13:00
-status: open
+status: done
 priority: high
 type: task
 suitability: auto_agent_ready
