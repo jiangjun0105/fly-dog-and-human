@@ -105,3 +105,7 @@ data/cache/                 # cached API responses (gitignored)
 ## Detailed setup guide
 
 See [docs/environment-setup.md](docs/environment-setup.md) for full setup instructions including verification steps and troubleshooting.
+
+## Multica auto-agent
+
+This repository was used as a target for a Multica auto-agent demo task, dispatched and executed autonomously via the Multica system.
