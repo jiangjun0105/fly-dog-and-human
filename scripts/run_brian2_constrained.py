@@ -146,13 +146,13 @@ S_input.connect(i=poisson_i, j=poisson_j)
 # Without this, ascending and intrinsic neurons receive net inhibition from
 # the recurrent network and remain silent.
 N_bg = 50  # Number of background Poisson sources
-PG_bg = PoissonGroup(N_bg, rates=20 * Hz)
-S_bg = Synapses(PG_bg, G, on_pre="v_post += 1.2*mV")
+PG_bg = PoissonGroup(N_bg, rates=22 * Hz)
+S_bg = Synapses(PG_bg, G, on_pre="v_post += 1.3*mV")
 # Connect to all neurons
 bg_i = np.repeat(np.arange(N_bg), 100)
 bg_j = np.tile(np.arange(100), N_bg)
 S_bg.connect(i=bg_i, j=bg_j)
-print(f"Background drive: {N_bg} sources at 20 Hz to all 100 neurons")
+print(f"Background drive: {N_bg} sources at 22 Hz to all 100 neurons")
 
 # --------------------------------------------------------------------------
 # Monitor and run
