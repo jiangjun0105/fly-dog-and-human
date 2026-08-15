@@ -369,6 +369,268 @@ def render_trained_video(checkpoint_path, duration_s=5.0, output_path=None, fps=
     }
 
 
+def render_functional_trained_video(
+    checkpoint_path,
+    duration_s=5.0,
+    output_path=None,
+    fps=30,
+    width=640,
+    height=480,
+    camera="nmf/trackcam",
+):
+    """Render a functionally-trained network (biological motor mapping) to MP4.
+
+    Parameters
+    ----------
+    checkpoint_path : str or Path
+        Path to .npz checkpoint from FunctionalTrainingHarness.
+    duration_s : float
+        Simulation duration in seconds.
+    output_path : str or Path, optional
+        Output path. Defaults to reports/functional_trained_demo.mp4.
+    fps, width, height : int
+        Video parameters.
+    camera : str
+        MuJoCo camera name.
+
+    Returns
+    -------
+    dict
+        Simulation metrics and output path.
+    """
+    import imageio
+    import mujoco
+
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    if output_path is None:
+        reports_dir = Path(os.environ.get(
+            "DIGITAL_DROSOPHILA_REPORTS_DIR", str(_DEFAULT_REPORTS_DIR)
+        ))
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        output_path = reports_dir / "functional_trained_demo.mp4"
+    else:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 70)
+    print("Functional Trained Network Demo — Video Render")
+    print(f"  Checkpoint: {checkpoint_path.name}")
+    print(f"  Duration: {duration_s}s | FPS: {fps} | Resolution: {width}x{height}")
+    print("=" * 70)
+
+    from .functional_training import FunctionalTrainedController
+
+    print("\n[1/3] Building functional trained controller...")
+    t0 = time.time()
+    ctrl = FunctionalTrainedController(checkpoint_path, episode_length_s=duration_s)
+    ctrl.reset()
+    print(f"  Built in {time.time() - t0:.1f}s")
+
+    model = ctrl._model
+    data = ctrl._data
+    renderer = mujoco.Renderer(model, height=height, width=width)
+
+    coupling_dt_s = ctrl._coupling_dt_ms / 1000.0
+    steps_per_frame = max(1, int(1.0 / (fps * coupling_dt_s)))
+    n_total_steps = ctrl._n_steps_total
+
+    print(f"\n[2/3] Running simulation and capturing frames...")
+    print(f"  Total coupling steps: {n_total_steps}")
+    print(f"  Capturing every {steps_per_frame} steps ({fps} fps target)")
+
+    writer = imageio.get_writer(
+        str(output_path), fps=fps, codec="libx264",
+        output_params=["-crf", "23", "-preset", "medium"],
+    )
+
+    t_sim_start = time.time()
+    step_count = 0
+    frame_count = 0
+
+    while not ctrl.done:
+        ctrl.step()
+        step_count += 1
+
+        if step_count % steps_per_frame == 0:
+            renderer.update_scene(data, camera=camera)
+            frame = renderer.render()
+            writer.append_data(frame)
+            frame_count += 1
+
+        if step_count % 250 == 0:
+            elapsed = time.time() - t_sim_start
+            pct = step_count / n_total_steps * 100
+            print(f"  Step {step_count}/{n_total_steps} ({pct:.0f}%) | "
+                  f"frames: {frame_count} | elapsed: {elapsed:.1f}s")
+
+    writer.close()
+    renderer.close()
+
+    sim_time = time.time() - t_sim_start
+    metrics = ctrl.get_metrics()
+    ctrl.close()
+
+    print(f"\n[3/3] Summary")
+    print(f"  Simulation: {duration_s}s in {sim_time:.1f}s wall-clock")
+    print(f"  Frames captured: {frame_count}")
+    print(f"  Video saved: {output_path}")
+    if "forward_speed_mm_per_s" in metrics:
+        print(f"  Forward speed: {metrics['forward_speed_mm_per_s']:.4f} mm/s")
+    print("=" * 70)
+
+    return {
+        **metrics,
+        "output_path": str(output_path),
+        "frame_count": frame_count,
+        "wall_time_s": sim_time,
+    }
+
+
+def render_functional_baseline_video(
+    duration_s=5.0,
+    output_path=None,
+    fps=30,
+    width=640,
+    height=480,
+    camera="nmf/trackcam",
+):
+    """Render the untrained functional network (connectome weights, no STDP) to MP4.
+
+    Parameters
+    ----------
+    duration_s : float
+    output_path : str or Path, optional
+        Defaults to reports/functional_baseline_demo.mp4.
+    fps, width, height : int
+    camera : str
+
+    Returns
+    -------
+    dict
+    """
+    import imageio
+    import mujoco
+
+    if output_path is None:
+        reports_dir = Path(os.environ.get(
+            "DIGITAL_DROSOPHILA_REPORTS_DIR", str(_DEFAULT_REPORTS_DIR)
+        ))
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        output_path = reports_dir / "functional_baseline_demo.mp4"
+    else:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 70)
+    print("Functional Network Baseline Demo — Video Render (untrained)")
+    print(f"  Duration: {duration_s}s | FPS: {fps} | Resolution: {width}x{height}")
+    print("=" * 70)
+
+    # Build untrained functional controller by creating a minimal controller
+    # using the snapshot connectivity and initial weights
+    from .functional_selection import load_network_snapshot, build_motor_actuator_map
+    from .functional_training import FunctionalTrainingHarness
+
+    print("\n[1/3] Building untrained functional controller (1 episode, 0 learning)...")
+    t0 = time.time()
+
+    # Use a short-circuit approach: build the harness with 0 episodes and
+    # extract the initial (untrained) weights to create a controller
+    import numpy as np
+    import tempfile, os as _os
+
+    (body_ids, meta_df, motor_leg_map,
+     sources_coo, targets_coo, weights_coo) = load_network_snapshot()
+
+    # Build a minimal untrained controller by saving initial weights as a fake checkpoint
+    harness = FunctionalTrainingHarness(
+        n_episodes=1,
+        episode_length_s=duration_s,
+    )
+    # Save a checkpoint with the untrained weights
+    tmp_dir = Path(tempfile.mkdtemp())
+    ckpt_path = tmp_dir / "untrained.npz"
+    np.savez_compressed(
+        ckpt_path,
+        weights=harness._initial_weights,
+        thresholds=harness._thresholds_mV,
+        body_ids=np.array(harness._body_ids, dtype=np.int64),
+        episode=0,
+    )
+    harness.close()
+
+    print(f"  Built in {time.time() - t0:.1f}s")
+
+    # Now render using FunctionalTrainedController
+    from .functional_training import FunctionalTrainedController
+    ctrl = FunctionalTrainedController(ckpt_path, episode_length_s=duration_s)
+    ctrl.reset()
+
+    model = ctrl._model
+    data = ctrl._data
+    renderer = mujoco.Renderer(model, height=height, width=width)
+
+    coupling_dt_s = ctrl._coupling_dt_ms / 1000.0
+    steps_per_frame = max(1, int(1.0 / (fps * coupling_dt_s)))
+    n_total_steps = ctrl._n_steps_total
+
+    print(f"\n[2/3] Running simulation and capturing frames...")
+
+    writer = imageio.get_writer(
+        str(output_path), fps=fps, codec="libx264",
+        output_params=["-crf", "23", "-preset", "medium"],
+    )
+
+    t_sim_start = time.time()
+    step_count = 0
+    frame_count = 0
+
+    while not ctrl.done:
+        ctrl.step()
+        step_count += 1
+
+        if step_count % steps_per_frame == 0:
+            renderer.update_scene(data, camera=camera)
+            frame = renderer.render()
+            writer.append_data(frame)
+            frame_count += 1
+
+        if step_count % 250 == 0:
+            elapsed = time.time() - t_sim_start
+            pct = step_count / n_total_steps * 100
+            print(f"  Step {step_count}/{n_total_steps} ({pct:.0f}%) | "
+                  f"frames: {frame_count} | elapsed: {elapsed:.1f}s")
+
+    writer.close()
+    renderer.close()
+
+    sim_time = time.time() - t_sim_start
+    metrics = ctrl.get_metrics()
+    ctrl.close()
+
+    # Cleanup temp dir
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    print(f"\n[3/3] Summary")
+    print(f"  Simulation: {duration_s}s in {sim_time:.1f}s wall-clock")
+    print(f"  Frames captured: {frame_count}")
+    print(f"  Video saved: {output_path}")
+    if "forward_speed_mm_per_s" in metrics:
+        print(f"  Forward speed: {metrics['forward_speed_mm_per_s']:.4f} mm/s")
+    print("=" * 70)
+
+    return {
+        **metrics,
+        "output_path": str(output_path),
+        "frame_count": frame_count,
+        "wall_time_s": sim_time,
+    }
+
+
 def run_demo_video(duration_s=3.0, fps=30):
     """Entry point for CLI: renders both neural and tripod videos."""
     print("Rendering neural-driven demo video...")

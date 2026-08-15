@@ -12,10 +12,13 @@ Usage:
     python -m digital_drosophila learn stdp_basic [--episodes N]
     python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0] [--topology biological|random] [--backend cpu|gpu]
     python -m digital_drosophila learn train_gpu [--episodes 50] [--episode-length 2.0]
+    python -m digital_drosophila learn train_functional [--episodes 50] [--episode-length 2.0] [--force-rebuild]
     python -m digital_drosophila learn evaluate --checkpoint PATH [--episodes 3] [--duration 5.0]
     python -m digital_drosophila learn experiment [--episodes 50] [--episode-length 2.0]
     python -m digital_drosophila demo video [--duration 3.0] [--fps 30]
     python -m digital_drosophila demo tripod [--duration 3.0] [--fps 30]
+    python -m digital_drosophila demo functional_trained --checkpoint PATH [--duration 5.0] [--fps 30]
+    python -m digital_drosophila demo functional_baseline [--duration 5.0] [--fps 30]
     python -m digital_drosophila benchmark locomotion [--episodes 10] [--duration 5.0]
     python -m digital_drosophila benchmark chemotaxis [--episodes 10] [--duration 10.0]
     python -m digital_drosophila benchmark navigation [--episodes 5] [--duration 5.0]
@@ -188,6 +191,35 @@ def main():
 
             run_evaluation(checkpoint, episodes=episodes, duration=duration)
 
+        elif subcommand == "train_functional":
+            # Parse --episodes, --episode-length, --force-rebuild
+            episodes = 50
+            episode_length = 2.0
+            force_rebuild = False
+            for i, arg in enumerate(args[2:], start=2):
+                if arg == "--episodes" and i + 1 < len(args):
+                    try:
+                        episodes = int(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid episodes value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--episode-length" and i + 1 < len(args):
+                    try:
+                        episode_length = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid episode-length value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--force-rebuild":
+                    force_rebuild = True
+
+            from .functional_training import run_functional_training
+
+            run_functional_training(
+                episodes=episodes,
+                episode_length=episode_length,
+                force_rebuild=force_rebuild,
+            )
+
         elif subcommand == "experiment":
             # Parse --episodes and --episode-length
             episodes = 50
@@ -213,10 +245,11 @@ def main():
         else:
             print(
                 "Usage: python -m digital_drosophila learn "
-                "<stdp_basic|train|train_gpu|evaluate|experiment> [options]\n"
+                "<stdp_basic|train|train_gpu|train_functional|evaluate|experiment> [options]\n"
                 "\n  stdp_basic [--episodes N]"
                 "\n  train [--episodes N] [--episode-length S] [--topology bio|random] [--backend cpu|gpu]"
                 "\n  train_gpu [--episodes N] [--episode-length S]"
+                "\n  train_functional [--episodes N] [--episode-length S] [--force-rebuild]"
                 "\n  evaluate --checkpoint PATH [--episodes N] [--duration S]"
                 "\n  experiment [--episodes N] [--episode-length S]"
             )
@@ -264,10 +297,22 @@ def main():
             from .video import render_trained_video
 
             render_trained_video(checkpoint, duration_s=duration, fps=fps)
+        elif subcommand == "functional_trained":
+            if checkpoint is None:
+                print("Error: --checkpoint path required for 'demo functional_trained'")
+                sys.exit(1)
+            from .video import render_functional_trained_video
+
+            render_functional_trained_video(checkpoint, duration_s=duration, fps=fps)
+        elif subcommand == "functional_baseline":
+            from .video import render_functional_baseline_video
+
+            render_functional_baseline_video(duration_s=duration, fps=fps)
         else:
             print(
                 "Usage: python -m digital_drosophila demo "
-                "<video|tripod|trained|both> [--duration S] [--fps N] [--checkpoint PATH]"
+                "<video|tripod|trained|functional_trained|functional_baseline|both> "
+                "[--duration S] [--fps N] [--checkpoint PATH]"
             )
             sys.exit(1)
 
