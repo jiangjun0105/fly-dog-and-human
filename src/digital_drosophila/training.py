@@ -346,12 +346,13 @@ class TrainingHarness:
         self._prev_spike_count = self._M.num_spikes
 
         # Record per-neuron spike counts at episode start for firing rate measurement
-        self._episode_spike_start = np.zeros(self._n_neurons)
-        # Count spikes per neuron from monitor up to this point
         if self._M.num_spikes > 0:
             spike_indices = np.array(self._M.i[:])
-            for idx in spike_indices:
-                self._episode_spike_start[idx] += 1
+            self._episode_spike_start = np.bincount(
+                spike_indices, minlength=self._n_neurons
+            ).astype(float)
+        else:
+            self._episode_spike_start = np.zeros(self._n_neurons)
 
         # Record start position
         self._episode_start_pos = self._data.qpos[0:3].copy()
@@ -418,18 +419,15 @@ class TrainingHarness:
         rates : ndarray
             Firing rate per neuron in Hz.
         """
-        # Count total spikes per neuron from the full monitor
-        spike_counts = np.zeros(self._n_neurons)
         if self._M.num_spikes > 0:
             spike_indices = np.array(self._M.i[:])
-            for idx in spike_indices:
-                spike_counts[idx] += 1
+            spike_counts = np.bincount(
+                spike_indices, minlength=self._n_neurons
+            ).astype(float)
+        else:
+            spike_counts = np.zeros(self._n_neurons)
 
-        # Subtract the count at episode start to get episode-only spikes
-        episode_spikes = spike_counts - self._episode_spike_start
-        episode_spikes = np.maximum(episode_spikes, 0)
-
-        # Convert to Hz
+        episode_spikes = np.maximum(spike_counts - self._episode_spike_start, 0)
         rates = episode_spikes / self.episode_length_s
         return rates
 
