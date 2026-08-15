@@ -10,8 +10,9 @@ Usage:
     python -m digital_drosophila loop closed_loop
     python -m digital_drosophila loop episode_demo
     python -m digital_drosophila learn stdp_basic [--episodes N]
-    python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0]
+    python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0] [--topology biological|random]
     python -m digital_drosophila learn evaluate --checkpoint PATH [--episodes 3] [--duration 5.0]
+    python -m digital_drosophila learn experiment [--episodes 50] [--episode-length 2.0]
     python -m digital_drosophila demo video [--duration 3.0] [--fps 30]
     python -m digital_drosophila demo tripod [--duration 3.0] [--fps 30]
     python -m digital_drosophila benchmark locomotion [--episodes 10] [--duration 5.0]
@@ -177,13 +178,36 @@ def main():
 
             run_evaluation(checkpoint, episodes=episodes, duration=duration)
 
+        elif subcommand == "experiment":
+            # Parse --episodes and --episode-length
+            episodes = 50
+            episode_length = 2.0
+            for i, arg in enumerate(args[2:], start=2):
+                if arg == "--episodes" and i + 1 < len(args):
+                    try:
+                        episodes = int(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid episodes value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--episode-length" and i + 1 < len(args):
+                    try:
+                        episode_length = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid episode-length value: {args[i + 1]!r}")
+                        sys.exit(1)
+
+            from .training import run_experiment
+
+            run_experiment(episodes=episodes, episode_length=episode_length)
+
         else:
             print(
                 "Usage: python -m digital_drosophila learn "
-                "<stdp_basic|train|evaluate> [options]\n"
+                "<stdp_basic|train|evaluate|experiment> [options]\n"
                 "\n  stdp_basic [--episodes N]"
-                "\n  train [--episodes N] [--episode-length S]"
+                "\n  train [--episodes N] [--episode-length S] [--topology bio|random]"
                 "\n  evaluate --checkpoint PATH [--episodes N] [--duration S]"
+                "\n  experiment [--episodes N] [--episode-length S]"
             )
             sys.exit(1)
 

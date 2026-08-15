@@ -1189,3 +1189,126 @@ def run_evaluation(checkpoint_path, episodes=3, duration=5.0):
         sign = "+" if change >= 0 else ""
         print(f"  {metric}: {before:.4f} -> {after:.4f} ({sign}{change:.4f})")
     print("=" * 60)
+
+
+def run_experiment(episodes=50, episode_length=2.0):
+    """Run the bio-vs-random topology comparison experiment (Epic 4.3).
+
+    Trains both biological and random-topology networks for the same number of
+    episodes, then compares their learning curves and final performance.
+
+    Parameters
+    ----------
+    episodes : int
+        Number of training episodes per condition.
+    episode_length : float
+        Episode length in seconds.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT: Biological vs Random Topology Learning")
+    print(f"  Episodes per condition: {episodes}")
+    print(f"  Episode length: {episode_length}s")
+    print("=" * 70)
+
+    results = {}
+
+    for topology in ("biological", "random"):
+        print(f"\n{'#' * 70}")
+        print(f"# CONDITION: {topology.upper()} TOPOLOGY")
+        print(f"{'#' * 70}")
+
+        harness = TrainingHarness(
+            n_episodes=episodes,
+            episode_length_s=episode_length,
+            coupling_dt_ms=2.0,
+            learning_rate=0.001,
+            tau_stdp_ms=20.0,
+            tau_eligibility_s=1.0,
+            motor_gain=0.3,
+            sensory_gain=500e-12,
+            baseline_window=5,
+            eta_homeo=0.01,
+            target_rate=25.0,
+            lambda_decay=0.001,
+            eligibility_decay_threshold=0.01,
+            checkpoint_interval=10,
+            topology=topology,
+        )
+
+        suffix = f"_{topology}" if topology != "biological" else ""
+        log_path = _DEFAULT_REPORTS_DIR / f"training_log{suffix}.json"
+        checkpoint_dir = _DEFAULT_REPORTS_DIR / f"checkpoints{suffix}"
+
+        try:
+            result = harness.train(checkpoint_dir=checkpoint_dir)
+            harness.save_results(result, path=log_path)
+            results[topology] = result
+        finally:
+            harness.close()
+
+    # Compare learning curves
+    print("\n" + "=" * 70)
+    print("EXPERIMENT RESULTS: Biological vs Random Topology")
+    print("=" * 70)
+
+    bio_rewards = results["biological"]["rewards"]
+    rand_rewards = results["random"]["rewards"]
+
+    print(f"\n  Biological topology:")
+    print(f"    Mean reward: {np.mean(bio_rewards):.6f} mm")
+    print(f"    First half: {np.mean(bio_rewards[:len(bio_rewards)//2]):.6f} mm")
+    print(f"    Second half: {np.mean(bio_rewards[len(bio_rewards)//2:]):.6f} mm")
+    print(f"    Final 5 episodes: {np.mean(bio_rewards[-5:]):.6f} mm")
+
+    print(f"\n  Random topology:")
+    print(f"    Mean reward: {np.mean(rand_rewards):.6f} mm")
+    print(f"    First half: {np.mean(rand_rewards[:len(rand_rewards)//2]):.6f} mm")
+    print(f"    Second half: {np.mean(rand_rewards[len(rand_rewards)//2:]):.6f} mm")
+    print(f"    Final 5 episodes: {np.mean(rand_rewards[-5:]):.6f} mm")
+
+    # Learning speed comparison
+    bio_improvement = (
+        np.mean(bio_rewards[len(bio_rewards)//2:])
+        - np.mean(bio_rewards[:len(bio_rewards)//2])
+    )
+    rand_improvement = (
+        np.mean(rand_rewards[len(rand_rewards)//2:])
+        - np.mean(rand_rewards[:len(rand_rewards)//2])
+    )
+
+    print(f"\n  Improvement (2nd half - 1st half):")
+    print(f"    Biological: {bio_improvement:+.6f} mm")
+    print(f"    Random: {rand_improvement:+.6f} mm")
+
+    if bio_improvement > rand_improvement:
+        print(f"\n  >> Biological topology shows FASTER learning")
+    elif rand_improvement > bio_improvement:
+        print(f"\n  >> Random topology shows faster learning (unexpected)")
+    else:
+        print(f"\n  >> No significant difference in learning speed")
+
+    print("=" * 70)
+
+    # Save comparison results
+    comparison = {
+        "biological": {
+            "rewards": bio_rewards,
+            "mean_reward": float(np.mean(bio_rewards)),
+            "improvement": float(bio_improvement),
+        },
+        "random": {
+            "rewards": rand_rewards,
+            "mean_reward": float(np.mean(rand_rewards)),
+            "improvement": float(rand_improvement),
+        },
+        "config": {
+            "episodes": episodes,
+            "episode_length_s": episode_length,
+        },
+    }
+
+    comparison_path = _DEFAULT_REPORTS_DIR / "experiment_comparison.json"
+    comparison_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(comparison_path, "w") as f:
+        json.dump(comparison, f, indent=2)
+    print(f"\nComparison saved: {comparison_path}")
