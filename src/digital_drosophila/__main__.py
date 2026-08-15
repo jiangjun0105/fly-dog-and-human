@@ -4,6 +4,7 @@ Usage:
     python -m digital_drosophila simulate minimal
     python -m digital_drosophila simulate constrained
     python -m digital_drosophila body verify
+    python -m digital_drosophila body locomotion
 """
 
 import sys
@@ -17,7 +18,8 @@ def main():
             "Usage: python -m digital_drosophila <command> [subcommand]\n"
             "\nCommands:\n"
             "  simulate <minimal|constrained>   Run SNN simulation\n"
-            "  body verify                      Verify MuJoCo/FlyGym installation"
+            "  body verify                      Verify MuJoCo/FlyGym installation\n"
+            "  body locomotion                  Run scripted locomotion demo"
         )
         sys.exit(1)
 
@@ -46,8 +48,14 @@ def main():
             from .body import verify_installation
 
             verify_installation()
+        elif subcommand == "locomotion":
+            from .locomotion import run_locomotion
+
+            run_locomotion()
         else:
-            print("Usage: python -m digital_drosophila body verify")
+            print(
+                "Usage: python -m digital_drosophila body <verify|locomotion>"
+            )
             sys.exit(1)
 
     else:
