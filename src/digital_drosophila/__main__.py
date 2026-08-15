@@ -8,6 +8,7 @@ Usage:
     python -m digital_drosophila body locomotion
     python -m digital_drosophila loop motor_test
     python -m digital_drosophila loop closed_loop
+    python -m digital_drosophila loop episode_demo
 """
 
 import sys
@@ -24,7 +25,8 @@ def main():
             "  body verify                               Verify MuJoCo/FlyGym installation\n"
             "  body locomotion                           Run scripted locomotion demo\n"
             "  loop motor_test                           Run motor output adapter test\n"
-            "  loop closed_loop                          Run closed-loop co-simulation"
+            "  loop closed_loop                          Run closed-loop co-simulation\n"
+            "  loop episode_demo                         Run episode-based harness demo"
         )
         sys.exit(1)
 
@@ -75,9 +77,14 @@ def main():
             from .closed_loop import run_closed_loop
 
             run_closed_loop()
+        elif subcommand == "episode_demo":
+            from .loop import run_episode_demo
+
+            run_episode_demo()
         else:
             print(
-                "Usage: python -m digital_drosophila loop <motor_test|closed_loop>"
+                "Usage: python -m digital_drosophila loop "
+                "<motor_test|closed_loop|episode_demo>"
             )
             sys.exit(1)
 
