@@ -10,6 +10,11 @@ Usage:
     python -m digital_drosophila loop closed_loop
     python -m digital_drosophila loop episode_demo
     python -m digital_drosophila learn stdp_basic [--episodes N]
+    python -m digital_drosophila demo video [--duration 3.0] [--fps 30]
+    python -m digital_drosophila demo tripod [--duration 3.0] [--fps 30]
+    python -m digital_drosophila benchmark locomotion [--episodes 10] [--duration 5.0]
+    python -m digital_drosophila benchmark chemotaxis [--episodes 10] [--duration 10.0]
+    python -m digital_drosophila benchmark navigation [--episodes 5] [--duration 5.0]
 """
 
 import sys
@@ -28,7 +33,8 @@ def main():
             "  loop motor_test                           Run motor output adapter test\n"
             "  loop closed_loop                          Run closed-loop co-simulation\n"
             "  loop episode_demo                         Run episode-based harness demo\n"
-            "  learn stdp_basic [--episodes N]           Run STDP learning (default 10 episodes)"
+            "  learn stdp_basic [--episodes N]           Run STDP learning (default 10 episodes)\n"
+            "  benchmark <locomotion|chemotaxis|navigation>  Run benchmark suite"
         )
         sys.exit(1)
 
@@ -114,8 +120,90 @@ def main():
             )
             sys.exit(1)
 
+    elif command == "demo":
+        subcommand = args[1] if len(args) > 1 else "video"
+
+        # Parse --duration and --fps
+        duration = 3.0
+        fps = 30
+        for i, arg in enumerate(args[2:], start=2):
+            if arg == "--duration" and i + 1 < len(args):
+                try:
+                    duration = float(args[i + 1])
+                except ValueError:
+                    print(f"Invalid duration: {args[i + 1]!r}")
+                    sys.exit(1)
+            elif arg == "--fps" and i + 1 < len(args):
+                try:
+                    fps = int(args[i + 1])
+                except ValueError:
+                    print(f"Invalid fps: {args[i + 1]!r}")
+                    sys.exit(1)
+
+        if subcommand == "video":
+            from .video import render_neural_video
+
+            render_neural_video(duration_s=duration, fps=fps)
+        elif subcommand == "tripod":
+            from .video import render_tripod_video
+
+            render_tripod_video(duration_s=duration, fps=fps)
+        elif subcommand == "both":
+            from .video import run_demo_video
+
+            run_demo_video(duration_s=duration, fps=fps)
+        else:
+            print(
+                "Usage: python -m digital_drosophila demo "
+                "<video|tripod|both> [--duration S] [--fps N]"
+            )
+            sys.exit(1)
+
+    elif command == "benchmark":
+        subcommand = args[1] if len(args) > 1 else ""
+
+        # Parse --episodes and --duration flags
+        episodes = 10
+        duration = 5.0
+        for i, arg in enumerate(args[2:], start=2):
+            if arg == "--episodes" and i + 1 < len(args):
+                try:
+                    episodes = int(args[i + 1])
+                except ValueError:
+                    print(f"Invalid episodes value: {args[i + 1]!r}")
+                    sys.exit(1)
+            elif arg == "--duration" and i + 1 < len(args):
+                try:
+                    duration = float(args[i + 1])
+                except ValueError:
+                    print(f"Invalid duration value: {args[i + 1]!r}")
+                    sys.exit(1)
+
+        if subcommand == "locomotion":
+            from .benchmarks.locomotion import run_locomotion_benchmark
+
+            run_locomotion_benchmark(n_episodes=episodes, duration_s=duration)
+        elif subcommand == "chemotaxis":
+            from .benchmarks.chemotaxis import run_chemotaxis_benchmark
+
+            run_chemotaxis_benchmark(n_episodes=episodes, duration_s=duration)
+        elif subcommand == "navigation":
+            from .benchmarks.navigation import run_navigation_benchmark
+
+            run_navigation_benchmark(n_episodes=episodes, duration_s=duration)
+        else:
+            print(
+                "Usage: python -m digital_drosophila benchmark "
+                "<locomotion|chemotaxis|navigation> [--episodes N] [--duration S]\n"
+                "\nAvailable benchmarks:\n"
+                "  locomotion   Evaluate locomotion controller performance\n"
+                "  chemotaxis   Evaluate chemotaxis gradient-following\n"
+                "  navigation   Evaluate goal-directed navigation"
+            )
+            sys.exit(1)
+
     else:
-        print(f"Unknown command: {command!r}. Choose from: simulate, body, loop, learn")
+        print(f"Unknown command: {command!r}. Choose from: simulate, body, loop, learn, demo, benchmark")
         sys.exit(1)
 
 
