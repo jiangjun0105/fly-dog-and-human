@@ -85,6 +85,7 @@ class TrainingHarness:
         checkpoint_interval=10,
         topology="biological",
         random_seed=42,
+        backend="cpu",
     ):
         self.n_episodes = n_episodes
         self.episode_length_s = episode_length_s
@@ -102,12 +103,16 @@ class TrainingHarness:
         self.checkpoint_interval = checkpoint_interval
         self.topology = topology
         self.random_seed = random_seed
+        self._backend_type = backend
 
         # Set env vars before importing heavy dependencies
         os.environ.setdefault("MUJOCO_GL", "egl")
 
         # Build the simulation
-        self._build()
+        if backend == "gpu":
+            self._build_gpu()
+        else:
+            self._build()
 
     def _build(self):
         """Build Brian2 network with adaptive-threshold neurons and STDP synapses."""
@@ -310,8 +315,126 @@ class TrainingHarness:
         motor_map = MotorMapping(self._motor_neuron_indices)
         self._mapping = motor_map.get_mapping()
 
+    def _build_gpu(self):
+        """Build PyGeNN GPU backend and FlyGym body (no Brian2)."""
+        import scipy.sparse as sp
+
+        from .network import load_sample_data, DEFAULT_LIF_PARAMS
+        from .constants import NT_SIGN_MAP
+        from .locomotion import build_simulation, settle_simulation
+        from .sensory_encoder import SensoryEncoder
+        from .motor_adapter import SpikeRateDecoder, MotorMapping
+        from .gpu_backend import PyGeNNBackend
+
+        # --- Load data ---
+        adj, neurons_df = load_sample_data()
+        self._n_neurons = adj.shape[0]
+        self._neurons_df = neurons_df
+
+        self._motor_neuron_indices = neurons_df[
+            neurons_df["superclass"] == "vnc_motor"
+        ].index.tolist()
+        self._ascending_indices = neurons_df[
+            neurons_df["superclass"] == "ascending_neuron"
+        ].index.tolist()
+
+        # --- Build sign vector ---
+        nt_series = neurons_df["consensusNt"]
+        confidence = neurons_df["predictedNtConfidence"].values
+        self._sign_vector = np.array(
+            [NT_SIGN_MAP.get(nt, 0) or 0 for nt in nt_series]
+        )
+        self._confidence = confidence
+
+        # --- Compute weights (same logic as Brian2 path) ---
+        sources, targets = adj.nonzero()
+        self._sources = sources
+        self._targets = targets
+
+        inh_attenuation = 0.5
+        scale = 0.6
+        sign_scale = np.where(
+            self._sign_vector[sources] >= 0, 1.0, inh_attenuation
+        )
+        weights_raw = (
+            np.log1p(adj[sources, targets])
+            * self._sign_vector[sources]
+            * confidence[sources]
+            * sign_scale
+            * scale
+        )
+
+        if self.topology == "random":
+            rng = np.random.default_rng(self.random_seed)
+            exc_mask = weights_raw > 0
+            inh_mask = weights_raw < 0
+            exc_vals = weights_raw[exc_mask].copy()
+            inh_vals = weights_raw[inh_mask].copy()
+            rng.shuffle(exc_vals)
+            rng.shuffle(inh_vals)
+            weights_raw[exc_mask] = exc_vals
+            weights_raw[inh_mask] = inh_vals
+
+        self._initial_weights = weights_raw.copy()
+        self._thresholds_mV = np.full(self._n_neurons, -50.0)
+
+        # --- Build PyGeNN backend ---
+        # Convert adjacency to sparse for backend
+        adj_sparse = sp.coo_matrix(
+            (np.ones(len(sources)), (sources, targets)),
+            shape=(self._n_neurons, self._n_neurons),
+        )
+
+        print("Building PyGeNN GPU backend (CUDA compilation)...")
+        self._gpu_backend = PyGeNNBackend(
+            adj_sparse,
+            weights_raw,
+            self._thresholds_mV,
+            self._motor_neuron_indices,
+            self._ascending_indices,
+            dt_ms=0.1,
+            coupling_dt_ms=self.coupling_dt_ms,
+            tau_stdp_ms=self.tau_stdp_ms,
+            tau_eligibility_ms=self.tau_eligibility_s * 1000.0,
+        )
+        self._gpu_backend.build()
+        print("PyGeNN backend ready.")
+
+        # --- FlyGym body (same as CPU path) ---
+        sim, fly, model, data, neutral_ctrl, actuator_names = build_simulation()
+        settle_simulation(sim, n_steps=2000)
+
+        self._sim = sim
+        self._fly = fly
+        self._model = model
+        self._data = data
+        self._neutral_ctrl = neutral_ctrl
+
+        self._initial_qpos = data.qpos.copy()
+        self._initial_qvel = data.qvel.copy()
+
+        flygym_dt_s = model.opt.timestep
+        self._flygym_steps_per_coupling = int(
+            self.coupling_dt_ms / (flygym_dt_s * 1000)
+        )
+
+        # --- Adapters ---
+        sensory_gain_pa = self.sensory_gain / 1e-12
+        self._encoder = SensoryEncoder(
+            self._ascending_indices, n_neurons=self._n_neurons, n_actuated=66,
+            gain_pa=sensory_gain_pa, vel_gain_pa=sensory_gain_pa * 0.6,
+        )
+        self._decoder = SpikeRateDecoder(
+            self._motor_neuron_indices, window_ms=50.0, dt_ms=self.coupling_dt_ms,
+        )
+        motor_map = MotorMapping(self._motor_neuron_indices)
+        self._mapping = motor_map.get_mapping()
+
     def _reset_episode(self):
         """Reset network and body for a new episode."""
+        if self._backend_type == "gpu":
+            return self._reset_episode_gpu()
+
         import brian2
         from brian2 import ms as brian_ms, mV as brian_mV, pA
 
@@ -362,8 +485,60 @@ class TrainingHarness:
         body_vel = self._data.qvel[0:3].copy()
         self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
 
+    def _reset_episode_gpu(self):
+        """Reset GPU backend and body for a new episode."""
+        import mujoco
+        from .motor_adapter import SpikeRateDecoder
+
+        # Reset GPU backend with current weights and thresholds
+        self._gpu_backend.reset(self._current_weights, self._thresholds_mV)
+
+        # Compute background tonic current matching the Brian2 Poisson drives.
+        # Brian2 uses stochastic Poisson input; tonic current needs to be higher
+        # to compensate for the missing fluctuation-driven firing.
+        # Target: bring neurons to ~2mV below threshold so recurrent + sensory
+        # input can push them over. V_th=-50, V_rest=-70, need ~18mV drive.
+        # I = dV / R_membrane = 18mV / 100MOhm = 0.18 nA = 180 pA
+        # Descending neurons get extra 30 pA drive.
+        bg_current_pA = 180.0
+        descending_extra_pA = 30.0
+        self._gpu_bg_currents = np.full(self._n_neurons, bg_current_pA, dtype=np.float32)
+        descending_mask = self._neurons_df["superclass"] == "descending_neuron"
+        descending_idx = self._neurons_df[descending_mask].index.tolist()
+        self._gpu_bg_currents[descending_idx] += descending_extra_pA
+
+        # Run burn-in on GPU (250 coupling steps = 500ms)
+        burn_in_steps = int(500.0 / self.coupling_dt_ms)
+        for _ in range(burn_in_steps):
+            self._gpu_backend.step(self._gpu_bg_currents)
+
+        # Reset spike counts after burn-in (don't count burn-in spikes)
+        self._gpu_backend._spike_counts[:] = 0
+
+        # Reset body
+        self._data.qpos[:] = self._initial_qpos
+        self._data.qvel[:] = self._initial_qvel
+        self._data.ctrl[:] = self._neutral_ctrl
+        mujoco.mj_forward(self._model, self._data)
+
+        # Reset decoder
+        self._decoder = SpikeRateDecoder(
+            self._motor_neuron_indices, window_ms=50.0, dt_ms=self.coupling_dt_ms,
+        )
+
+        # Record start position
+        self._episode_start_pos = self._data.qpos[0:3].copy()
+
+        # Initialize sensory currents
+        joint_angles = self._sim.get_joint_angles("nmf")
+        body_vel = self._data.qvel[0:3].copy()
+        self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
     def _run_episode(self):
         """Run one episode of the closed-loop simulation."""
+        if self._backend_type == "gpu":
+            return self._run_episode_gpu()
+
         import brian2
         from brian2 import ms as brian_ms, pA
         from flygym.compose import ActuatorType
@@ -411,14 +586,45 @@ class TrainingHarness:
             body_vel = self._data.qvel[0:3].copy()
             self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
 
-    def _compute_firing_rates(self):
-        """Compute per-neuron firing rate (Hz) during this episode.
+    def _run_episode_gpu(self):
+        """Run one episode using GPU backend for neural simulation."""
+        from flygym.compose import ActuatorType
+        from .motor_adapter import decode_spikes_to_positions
 
-        Returns
-        -------
-        rates : ndarray
-            Firing rate per neuron in Hz.
-        """
+        n_steps = int(self.episode_length_s * 1000 / self.coupling_dt_ms)
+
+        for step in range(n_steps):
+            # 1. Step GPU neural simulation with sensory + background currents
+            # Sensory currents are in Amps (from encoder), convert to pA
+            sensory_pA = self._sensory_currents * 1e12
+            combined_currents = sensory_pA + self._gpu_bg_currents
+            motor_spikes = self._gpu_backend.step(combined_currents)
+
+            # 2. Decode motor spikes
+            self._decoder.update(motor_spikes)
+            rates = self._decoder.get_rates_hz()
+
+            # 3. Convert to actuator positions and step body
+            action = decode_spikes_to_positions(
+                rates, self._mapping, self._neutral_ctrl,
+                baseline_hz=15.0, amplitude=self.motor_gain,
+            )
+
+            for _ in range(self._flygym_steps_per_coupling):
+                self._sim.set_actuator_inputs("nmf", ActuatorType.POSITION, action)
+                self._sim.step()
+
+            # 4. Read sensors
+            joint_angles = self._sim.get_joint_angles("nmf")
+            body_vel = self._data.qvel[0:3].copy()
+            self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
+    def _compute_firing_rates(self):
+        """Compute per-neuron firing rate (Hz) during this episode."""
+        if self._backend_type == "gpu":
+            counts = self._gpu_backend.get_spike_counts().astype(float)
+            return counts / self.episode_length_s
+
         if self._M.num_spikes > 0:
             spike_indices = np.array(self._M.i[:])
             spike_counts = np.bincount(
@@ -439,22 +645,7 @@ class TrainingHarness:
         return float(displacement[0])
 
     def _update_weights(self, reward, rewards_history):
-        """Apply reward-modulated weight update using eligibility traces.
-
-        Parameters
-        ----------
-        reward : float
-            Reward for this episode (forward distance in mm).
-        rewards_history : list of float
-            All past rewards for baseline computation.
-
-        Returns
-        -------
-        stats : dict
-            Weight update statistics.
-        """
-        from brian2 import mV as brian_mV
-
+        """Apply reward-modulated weight update using eligibility traces."""
         # Compute dopamine signal (reward prediction error)
         if len(rewards_history) >= 2:
             recent = rewards_history[-min(self.baseline_window, len(rewards_history)):]
@@ -463,8 +654,11 @@ class TrainingHarness:
             baseline = 0.0
         dopamine = reward - baseline
 
-        # Read eligibility traces from synapses
-        eligibility = np.array(self._S.eligibility[:])
+        # Read eligibility traces from backend
+        if self._backend_type == "gpu":
+            eligibility = self._gpu_backend.get_eligibility()
+        else:
+            eligibility = np.array(self._S.eligibility[:])
 
         # Compute weight deltas
         dw = self.learning_rate * eligibility * dopamine
@@ -544,7 +738,10 @@ class TrainingHarness:
             Decay statistics.
         """
         # Read current eligibility traces
-        eligibility = np.array(self._S.eligibility[:])
+        if self._backend_type == "gpu":
+            eligibility = self._gpu_backend.get_eligibility()
+        else:
+            eligibility = np.array(self._S.eligibility[:])
 
         # Identify inactive synapses (low eligibility)
         inactive_mask = np.abs(eligibility) < self.eligibility_decay_threshold
@@ -610,6 +807,7 @@ class TrainingHarness:
         """
         print("=" * 70)
         print("Training Harness: STDP + Homeostatic Plasticity + Synaptic Decay")
+        print(f"  Backend: {self._backend_type.upper()}")
         print(f"  Topology: {self.topology}")
         print(f"  Episodes: {self.n_episodes}")
         print(f"  Episode length: {self.episode_length_s}s")
@@ -815,6 +1013,9 @@ class TrainingHarness:
 
     def close(self):
         """Clean up resources."""
+        if hasattr(self, "_gpu_backend") and self._gpu_backend is not None:
+            self._gpu_backend.close()
+            self._gpu_backend = None
         if hasattr(self, "_sim") and self._sim is not None:
             self._sim.close()
             self._sim = None
@@ -1083,7 +1284,7 @@ class TrainedController:
             self._sim = None
 
 
-def run_training(episodes=50, episode_length=2.0, topology="biological"):
+def run_training(episodes=50, episode_length=2.0, topology="biological", backend="cpu"):
     """Run the training harness with homeostatic plasticity and synaptic decay.
 
     Parameters
@@ -1094,9 +1295,11 @@ def run_training(episodes=50, episode_length=2.0, topology="biological"):
         Episode length in seconds.
     topology : str
         "biological" (connectome-derived) or "random" (shuffled weights).
+    backend : str
+        "cpu" (Brian2) or "gpu" (PyGeNN).
     """
-    print(f"\nStarting training harness ({topology} topology) with {episodes} episodes "
-          f"({episode_length}s each)...\n")
+    print(f"\nStarting training harness ({topology} topology, {backend.upper()} backend) "
+          f"with {episodes} episodes ({episode_length}s each)...\n")
 
     harness = TrainingHarness(
         n_episodes=episodes,
@@ -1114,10 +1317,13 @@ def run_training(episodes=50, episode_length=2.0, topology="biological"):
         eligibility_decay_threshold=0.01,
         checkpoint_interval=10,
         topology=topology,
+        backend=backend,
     )
 
-    # Use topology-specific output paths
+    # Use topology/backend-specific output paths
     suffix = f"_{topology}" if topology != "biological" else ""
+    if backend == "gpu":
+        suffix += "_gpu"
     log_path = _DEFAULT_REPORTS_DIR / f"training_log{suffix}.json"
     checkpoint_dir = _DEFAULT_REPORTS_DIR / f"checkpoints{suffix}"
 

@@ -10,7 +10,8 @@ Usage:
     python -m digital_drosophila loop closed_loop
     python -m digital_drosophila loop episode_demo
     python -m digital_drosophila learn stdp_basic [--episodes N]
-    python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0] [--topology biological|random]
+    python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0] [--topology biological|random] [--backend cpu|gpu]
+    python -m digital_drosophila learn train_gpu [--episodes 50] [--episode-length 2.0]
     python -m digital_drosophila learn evaluate --checkpoint PATH [--episodes 3] [--duration 5.0]
     python -m digital_drosophila learn experiment [--episodes 50] [--episode-length 2.0]
     python -m digital_drosophila demo video [--duration 3.0] [--fps 30]
@@ -37,7 +38,8 @@ def main():
             "  loop closed_loop                          Run closed-loop co-simulation\n"
             "  loop episode_demo                         Run episode-based harness demo\n"
             "  learn stdp_basic [--episodes N]           Run STDP learning (default 10 episodes)\n"
-            "  learn train [--episodes N] [--episode-length S]  Extended training with homeostasis\n"
+            "  learn train [--episodes N] [--backend cpu|gpu]    Extended training with homeostasis\n"
+            "  learn train_gpu [--episodes N]                    GPU-accelerated training (PyGeNN)\n"
             "  benchmark <locomotion|chemotaxis|navigation>  Run benchmark suite"
         )
         sys.exit(1)
@@ -118,11 +120,12 @@ def main():
 
             run_stdp_basic(episodes=episodes)
 
-        elif subcommand == "train":
-            # Parse --episodes, --episode-length, --topology flags
+        elif subcommand in ("train", "train_gpu"):
+            # Parse --episodes, --episode-length, --topology, --backend flags
             episodes = 50
             episode_length = 2.0
             topology = "biological"
+            backend = "gpu" if subcommand == "train_gpu" else "cpu"
             for i, arg in enumerate(args[2:], start=2):
                 if arg == "--episodes" and i + 1 < len(args):
                     try:
@@ -142,11 +145,18 @@ def main():
                         print(f"Invalid topology: {topology!r}. "
                               "Choose 'biological' or 'random'.")
                         sys.exit(1)
+                elif arg == "--backend" and i + 1 < len(args):
+                    backend = args[i + 1]
+                    if backend not in ("cpu", "gpu"):
+                        print(f"Invalid backend: {backend!r}. "
+                              "Choose 'cpu' or 'gpu'.")
+                        sys.exit(1)
 
             from .training import run_training
 
             run_training(
-                episodes=episodes, episode_length=episode_length, topology=topology
+                episodes=episodes, episode_length=episode_length,
+                topology=topology, backend=backend,
             )
 
         elif subcommand == "evaluate":
@@ -203,9 +213,10 @@ def main():
         else:
             print(
                 "Usage: python -m digital_drosophila learn "
-                "<stdp_basic|train|evaluate|experiment> [options]\n"
+                "<stdp_basic|train|train_gpu|evaluate|experiment> [options]\n"
                 "\n  stdp_basic [--episodes N]"
-                "\n  train [--episodes N] [--episode-length S] [--topology bio|random]"
+                "\n  train [--episodes N] [--episode-length S] [--topology bio|random] [--backend cpu|gpu]"
+                "\n  train_gpu [--episodes N] [--episode-length S]"
                 "\n  evaluate --checkpoint PATH [--episodes N] [--duration S]"
                 "\n  experiment [--episodes N] [--episode-length S]"
             )
