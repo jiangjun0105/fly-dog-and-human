@@ -83,6 +83,8 @@ class TrainingHarness:
         lambda_decay=0.001,
         eligibility_decay_threshold=0.01,
         checkpoint_interval=10,
+        topology="biological",
+        random_seed=42,
     ):
         self.n_episodes = n_episodes
         self.episode_length_s = episode_length_s
@@ -98,6 +100,8 @@ class TrainingHarness:
         self.lambda_decay = lambda_decay
         self.eligibility_decay_threshold = eligibility_decay_threshold
         self.checkpoint_interval = checkpoint_interval
+        self.topology = topology
+        self.random_seed = random_seed
 
         # Set env vars before importing heavy dependencies
         os.environ.setdefault("MUJOCO_GL", "egl")
@@ -236,6 +240,19 @@ class TrainingHarness:
             * sign_scale
             * scale
         )
+
+        # For random topology: shuffle weight magnitudes within sign groups
+        if self.topology == "random":
+            rng = np.random.default_rng(self.random_seed)
+            exc_mask = weights_raw > 0
+            inh_mask = weights_raw < 0
+            exc_vals = weights_raw[exc_mask].copy()
+            inh_vals = weights_raw[inh_mask].copy()
+            rng.shuffle(exc_vals)
+            rng.shuffle(inh_vals)
+            weights_raw[exc_mask] = exc_vals
+            weights_raw[inh_mask] = inh_vals
+
         S.w = weights_raw * brian_mV
 
         self._S = S
@@ -579,8 +596,13 @@ class TrainingHarness:
         )
         return checkpoint_path
 
-    def train(self):
+    def train(self, checkpoint_dir=None):
         """Run the full training loop with homeostatic plasticity and synaptic decay.
+
+        Parameters
+        ----------
+        checkpoint_dir : Path or str, optional
+            Directory for weight checkpoints. Defaults to reports/checkpoints/.
 
         Returns
         -------
@@ -590,6 +612,7 @@ class TrainingHarness:
         """
         print("=" * 70)
         print("Training Harness: STDP + Homeostatic Plasticity + Synaptic Decay")
+        print(f"  Topology: {self.topology}")
         print(f"  Episodes: {self.n_episodes}")
         print(f"  Episode length: {self.episode_length_s}s")
         print(f"  Learning rate: {self.learning_rate} mV")
@@ -602,7 +625,9 @@ class TrainingHarness:
         print("=" * 70)
 
         # Prepare output directories
-        checkpoint_dir = _DEFAULT_REPORTS_DIR / "checkpoints"
+        if checkpoint_dir is None:
+            checkpoint_dir = _DEFAULT_REPORTS_DIR / "checkpoints"
+        checkpoint_dir = Path(checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize current weights from initial weights
@@ -751,6 +776,8 @@ class TrainingHarness:
                 "target_rate": self.target_rate,
                 "lambda_decay": self.lambda_decay,
                 "eligibility_decay_threshold": self.eligibility_decay_threshold,
+                "topology": self.topology,
+                "random_seed": self.random_seed,
             },
             "episodes": [],
         }
@@ -795,7 +822,270 @@ class TrainingHarness:
             self._sim = None
 
 
-def run_training(episodes=50, episode_length=2.0):
+class TrainedController:
+    """Controller that uses trained weights from a checkpoint file.
+
+    Conforms to the Controller protocol used by BenchmarkRunner:
+    reset(), step(), done (property), get_metrics(), close().
+    """
+
+    def __init__(self, checkpoint_path, episode_length_s=5.0):
+        """Create a controller using trained weights.
+
+        Parameters
+        ----------
+        checkpoint_path : str or Path
+            Path to .npz checkpoint (with 'weights' and 'thresholds' arrays).
+        episode_length_s : float
+            Episode duration for evaluation.
+        """
+        self._checkpoint_path = Path(checkpoint_path)
+        self._episode_length_s = episode_length_s
+
+        # Load checkpoint
+        ckpt = np.load(self._checkpoint_path)
+        self._trained_weights = ckpt["weights"]
+        self._trained_thresholds = ckpt["thresholds"]
+
+        self._build()
+
+    def _build(self):
+        """Build co-simulation with trained weights and adaptive thresholds."""
+        import brian2
+        brian2.prefs.codegen.target = "numpy"
+
+        from brian2 import (
+            Network, SpikeMonitor, NeuronGroup,
+            Hz as brian_Hz, mV as brian_mV, ms as brian_ms,
+            Mohm as brian_Mohm, pA,
+        )
+
+        from .network import (
+            load_sample_data,
+            create_poisson_drive,
+            create_background_drive,
+            DEFAULT_LIF_PARAMS,
+        )
+        from .constants import NT_SIGN_MAP
+        from .locomotion import build_simulation, settle_simulation
+        from .sensory_encoder import SensoryEncoder
+        from .motor_adapter import SpikeRateDecoder, MotorMapping
+
+        # Load data
+        adj, neurons_df = load_sample_data()
+        self._n_neurons = adj.shape[0]
+
+        self._motor_neuron_indices = neurons_df[
+            neurons_df["superclass"] == "vnc_motor"
+        ].index.tolist()
+        self._ascending_indices = neurons_df[
+            neurons_df["superclass"] == "ascending_neuron"
+        ].index.tolist()
+
+        # Build neuron group with adaptive threshold
+        params = DEFAULT_LIF_PARAMS
+        tau_m = params["tau_m"]
+        V_rest = params["V_rest"]
+        V_reset = params["V_reset"]
+        R_membrane = params["R_membrane"]
+        t_refract = params["t_refract"]
+
+        eqs = """
+        dv/dt = (-(v - V_rest) + R_membrane * I) / tau_m : volt (unless refractory)
+        I : amp
+        V_th_adapt : volt
+        """
+
+        namespace = {
+            "tau_m": tau_m,
+            "V_rest": V_rest,
+            "V_reset": V_reset,
+            "R_membrane": R_membrane,
+        }
+
+        G = NeuronGroup(
+            self._n_neurons,
+            eqs,
+            threshold="v > V_th_adapt",
+            reset="v = V_reset",
+            refractory=t_refract,
+            method="euler",
+            namespace=namespace,
+        )
+        G.v = V_rest
+        G.V_th_adapt = self._trained_thresholds * brian_mV
+
+        # Build synapses with trained weights (no STDP needed for inference)
+        from brian2 import Synapses
+        S = Synapses(G, G, "w : volt", on_pre="v_post += w")
+        sources, targets = adj.nonzero()
+        S.connect(i=sources, j=targets)
+        S.w = self._trained_weights * brian_mV
+
+        # Input drives
+        PG, S_input, _ = create_poisson_drive(
+            G, neurons_df, target_superclass="descending_neuron",
+            n_sources=15, rate=10 * brian_Hz, weight=2.0 * brian_mV,
+        )
+        PG_bg, S_bg = create_background_drive(
+            G, self._n_neurons, n_sources=50, rate=22 * brian_Hz, weight=1.3 * brian_mV,
+        )
+        M = SpikeMonitor(G)
+
+        self._net = Network(G, S, PG, S_input, PG_bg, S_bg, M)
+        self._G = G
+        self._M = M
+        self._net.store("initial")
+
+        # FlyGym body
+        sim, fly, model, data, neutral_ctrl, actuator_names = build_simulation()
+        settle_simulation(sim, n_steps=2000)
+
+        self._sim = sim
+        self._fly = fly
+        self._model = model
+        self._data = data
+        self._neutral_ctrl = neutral_ctrl
+        self._initial_qpos = data.qpos.copy()
+        self._initial_qvel = data.qvel.copy()
+
+        flygym_dt_s = model.opt.timestep
+        self._flygym_steps_per_coupling = int(2.0 / (flygym_dt_s * 1000))
+        self._coupling_dt_ms = 2.0
+
+        # Adapters
+        sensory_gain_pa = 500e-12 / 1e-12
+        self._encoder = SensoryEncoder(
+            self._ascending_indices, n_neurons=self._n_neurons, n_actuated=66,
+            gain_pa=sensory_gain_pa, vel_gain_pa=sensory_gain_pa * 0.6,
+        )
+        self._decoder = SpikeRateDecoder(
+            self._motor_neuron_indices, window_ms=50.0, dt_ms=2.0,
+        )
+        motor_map = MotorMapping(self._motor_neuron_indices)
+        self._mapping = motor_map.get_mapping()
+
+        # Episode tracking
+        self._n_steps_total = int(self._episode_length_s * 1000 / self._coupling_dt_ms)
+        self._step_count = 0
+        self._prev_spike_count = 0
+
+        # Trajectory collection
+        self._positions = []
+        self._headings = []
+        self._actions = []
+
+    def reset(self):
+        from brian2 import ms as brian_ms, mV as brian_mV, pA
+        import mujoco
+
+        self._net.restore("initial")
+        self._G.V_th_adapt[:] = self._trained_thresholds * brian_mV
+
+        self._data.qpos[:] = self._initial_qpos
+        self._data.qvel[:] = self._initial_qvel
+        self._data.ctrl[:] = self._neutral_ctrl
+        mujoco.mj_forward(self._model, self._data)
+
+        from .motor_adapter import SpikeRateDecoder
+        self._decoder = SpikeRateDecoder(
+            self._motor_neuron_indices, window_ms=50.0, dt_ms=2.0,
+        )
+
+        # Burn-in
+        self._G.I = 0 * pA
+        self._net.run(500 * brian_ms)
+        self._prev_spike_count = self._M.num_spikes
+
+        self._step_count = 0
+        self._positions = []
+        self._headings = []
+        self._actions = []
+
+        # Initial sensory
+        joint_angles = self._sim.get_joint_angles("nmf")
+        body_vel = self._data.qvel[0:3].copy()
+        self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
+        self._record_state()
+
+    def step(self):
+        import brian2
+        from brian2 import ms as brian_ms, pA
+        from flygym.compose import ActuatorType
+        from .motor_adapter import decode_spikes_to_positions
+
+        # Inject sensory
+        self._G.I = 0 * pA
+        for idx in self._ascending_indices:
+            self._G.I[idx] = self._sensory_currents[idx] * brian2.amp
+
+        # Run neural
+        self._net.run(self._coupling_dt_ms * brian_ms)
+
+        # Decode spikes
+        current_spike_count = self._M.num_spikes
+        if current_spike_count > self._prev_spike_count:
+            new_spike_indices = np.array(self._M.i)[
+                self._prev_spike_count:current_spike_count
+            ]
+            motor_spike_set = set(new_spike_indices) & set(self._motor_neuron_indices)
+            self._decoder.update(motor_spike_set)
+        else:
+            self._decoder.update(set())
+        self._prev_spike_count = current_spike_count
+
+        rates = self._decoder.get_rates_hz()
+
+        # Motor output
+        action = decode_spikes_to_positions(
+            rates, self._mapping, self._neutral_ctrl,
+            baseline_hz=15.0, amplitude=0.3,
+        )
+
+        for _ in range(self._flygym_steps_per_coupling):
+            self._sim.set_actuator_inputs("nmf", ActuatorType.POSITION, action)
+            self._sim.step()
+
+        # Sensory feedback
+        joint_angles = self._sim.get_joint_angles("nmf")
+        body_vel = self._data.qvel[0:3].copy()
+        self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
+        self._step_count += 1
+        self._record_state()
+
+    def _record_state(self):
+        self._positions.append(self._data.qpos[0:3].copy())
+        quat = self._data.qpos[3:7]
+        w, x, y, z = quat
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        self._headings.append(float(np.arctan2(siny_cosp, cosy_cosp)))
+        self._actions.append(self._data.ctrl.copy())
+
+    @property
+    def done(self):
+        return self._step_count >= self._n_steps_total
+
+    def get_metrics(self):
+        from .benchmarks.locomotion import compute_locomotion_metrics
+        trajectory = {
+            "positions": np.array(self._positions),
+            "headings": np.array(self._headings),
+            "actions": np.array(self._actions),
+            "dt": self._coupling_dt_ms / 1000.0,
+            "leg_contacts": None,
+        }
+        return compute_locomotion_metrics(trajectory)
+
+    def close(self):
+        if hasattr(self, "_sim") and self._sim is not None:
+            self._sim.close()
+            self._sim = None
+
+
+def run_training(episodes=50, episode_length=2.0, topology="biological"):
     """Run the training harness with homeostatic plasticity and synaptic decay.
 
     Parameters
@@ -804,8 +1094,10 @@ def run_training(episodes=50, episode_length=2.0):
         Number of training episodes.
     episode_length : float
         Episode length in seconds.
+    topology : str
+        "biological" (connectome-derived) or "random" (shuffled weights).
     """
-    print(f"\nStarting training harness with {episodes} episodes "
+    print(f"\nStarting training harness ({topology} topology) with {episodes} episodes "
           f"({episode_length}s each)...\n")
 
     harness = TrainingHarness(
@@ -823,11 +1115,77 @@ def run_training(episodes=50, episode_length=2.0):
         lambda_decay=0.001,
         eligibility_decay_threshold=0.01,
         checkpoint_interval=10,
+        topology=topology,
     )
 
+    # Use topology-specific output paths
+    suffix = f"_{topology}" if topology != "biological" else ""
+    log_path = _DEFAULT_REPORTS_DIR / f"training_log{suffix}.json"
+    checkpoint_dir = _DEFAULT_REPORTS_DIR / f"checkpoints{suffix}"
+
     try:
-        results = harness.train()
-        log_path = harness.save_results(results)
+        results = harness.train(checkpoint_dir=checkpoint_dir)
+        harness.save_results(results, path=log_path)
         print(f"\nDone. Training log: {log_path}")
     finally:
         harness.close()
+
+
+def run_evaluation(checkpoint_path, episodes=3, duration=5.0):
+    """Evaluate a trained checkpoint against the untrained baseline.
+
+    Parameters
+    ----------
+    checkpoint_path : str
+        Path to .npz checkpoint.
+    episodes : int
+        Number of evaluation episodes.
+    duration : float
+        Episode duration in seconds.
+    """
+    from .benchmarks.common import BenchmarkRunner
+    from .benchmarks.locomotion import BiologicalController
+
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        print(f"Checkpoint not found: {checkpoint_path}")
+        return
+
+    print(f"\nEvaluating checkpoint: {checkpoint_path.name}")
+    print(f"  Episodes: {episodes}, Duration: {duration}s\n")
+
+    # Run untrained baseline
+    print("--- Untrained (connectome weights) ---")
+    runner = BenchmarkRunner(
+        controller_factory=lambda: BiologicalController(episode_length_s=duration),
+        controller_name="untrained",
+    )
+    untrained_result = runner.run("locomotion", n_episodes=episodes)
+
+    # Run trained controller
+    print("\n--- Trained (after STDP + homeostasis) ---")
+    runner = BenchmarkRunner(
+        controller_factory=lambda: TrainedController(
+            checkpoint_path, episode_length_s=duration
+        ),
+        controller_name="trained",
+    )
+    trained_result = runner.run("locomotion", n_episodes=episodes)
+
+    # Comparison
+    print("\n" + "=" * 60)
+    print("BEFORE vs AFTER TRAINING")
+    print("=" * 60)
+    key_metrics = [
+        "forward_speed_mm_per_s",
+        "lateral_deviation_mm",
+        "energy_efficiency",
+        "turn_bias_deg_per_s",
+    ]
+    for metric in key_metrics:
+        before = untrained_result.metrics_mean.get(metric, 0)
+        after = trained_result.metrics_mean.get(metric, 0)
+        change = after - before
+        sign = "+" if change >= 0 else ""
+        print(f"  {metric}: {before:.4f} -> {after:.4f} ({sign}{change:.4f})")
+    print("=" * 60)

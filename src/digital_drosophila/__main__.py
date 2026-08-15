@@ -11,6 +11,7 @@ Usage:
     python -m digital_drosophila loop episode_demo
     python -m digital_drosophila learn stdp_basic [--episodes N]
     python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0]
+    python -m digital_drosophila learn evaluate --checkpoint PATH [--episodes 3] [--duration 5.0]
     python -m digital_drosophila demo video [--duration 3.0] [--fps 30]
     python -m digital_drosophila demo tripod [--duration 3.0] [--fps 30]
     python -m digital_drosophila benchmark locomotion [--episodes 10] [--duration 5.0]
@@ -117,9 +118,10 @@ def main():
             run_stdp_basic(episodes=episodes)
 
         elif subcommand == "train":
-            # Parse --episodes and --episode-length flags
+            # Parse --episodes, --episode-length, --topology flags
             episodes = 50
             episode_length = 2.0
+            topology = "biological"
             for i, arg in enumerate(args[2:], start=2):
                 if arg == "--episodes" and i + 1 < len(args):
                     try:
@@ -133,15 +135,55 @@ def main():
                     except ValueError:
                         print(f"Invalid episode-length value: {args[i + 1]!r}")
                         sys.exit(1)
+                elif arg == "--topology" and i + 1 < len(args):
+                    topology = args[i + 1]
+                    if topology not in ("biological", "random"):
+                        print(f"Invalid topology: {topology!r}. "
+                              "Choose 'biological' or 'random'.")
+                        sys.exit(1)
 
             from .training import run_training
 
-            run_training(episodes=episodes, episode_length=episode_length)
+            run_training(
+                episodes=episodes, episode_length=episode_length, topology=topology
+            )
+
+        elif subcommand == "evaluate":
+            # Parse --checkpoint, --episodes, --duration
+            checkpoint = None
+            episodes = 3
+            duration = 5.0
+            for i, arg in enumerate(args[2:], start=2):
+                if arg == "--checkpoint" and i + 1 < len(args):
+                    checkpoint = args[i + 1]
+                elif arg == "--episodes" and i + 1 < len(args):
+                    try:
+                        episodes = int(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid episodes value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--duration" and i + 1 < len(args):
+                    try:
+                        duration = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid duration value: {args[i + 1]!r}")
+                        sys.exit(1)
+
+            if checkpoint is None:
+                print("Error: --checkpoint path required")
+                sys.exit(1)
+
+            from .training import run_evaluation
+
+            run_evaluation(checkpoint, episodes=episodes, duration=duration)
 
         else:
             print(
                 "Usage: python -m digital_drosophila learn "
-                "<stdp_basic|train> [--episodes N] [--episode-length S]"
+                "<stdp_basic|train|evaluate> [options]\n"
+                "\n  stdp_basic [--episodes N]"
+                "\n  train [--episodes N] [--episode-length S]"
+                "\n  evaluate --checkpoint PATH [--episodes N] [--duration S]"
             )
             sys.exit(1)
 
