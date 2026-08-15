@@ -245,6 +245,130 @@ def render_tripod_video(duration_s=3.0, output_path=None, fps=30,
     }
 
 
+def render_trained_video(checkpoint_path, duration_s=5.0, output_path=None, fps=30,
+                         width=640, height=480, camera="nmf/trackcam"):
+    """Render a trained network (from checkpoint) driving the fly body to MP4.
+
+    Parameters
+    ----------
+    checkpoint_path : str or Path
+        Path to .npz checkpoint (with 'weights' and 'thresholds' arrays).
+    duration_s : float
+        Simulation duration in seconds.
+    output_path : str or Path, optional
+        Output MP4 path. Defaults to reports/trained_demo.mp4.
+    fps : int
+        Video frame rate.
+    width, height : int
+        Frame dimensions.
+    camera : str
+        MuJoCo camera name for rendering.
+
+    Returns
+    -------
+    dict
+        Simulation metrics and output path.
+    """
+    import imageio
+    import mujoco
+
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    if output_path is None:
+        reports_dir = Path(os.environ.get(
+            "DIGITAL_DROSOPHILA_REPORTS_DIR", str(_DEFAULT_REPORTS_DIR)
+        ))
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        output_path = reports_dir / "trained_demo.mp4"
+    else:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 70)
+    print("Trained Network Demo — Video Render")
+    print(f"  Checkpoint: {checkpoint_path.name}")
+    print(f"  Duration: {duration_s}s | FPS: {fps} | Resolution: {width}x{height}")
+    print("=" * 70)
+
+    # Build controller from checkpoint
+    print("\n[1/3] Building trained controller (Brian2 + FlyGym)...")
+    t0 = time.time()
+
+    from .training import TrainedController
+
+    ctrl = TrainedController(checkpoint_path, episode_length_s=duration_s)
+    ctrl.reset()
+
+    build_time = time.time() - t0
+    print(f"  Built in {build_time:.1f}s")
+
+    # Set up renderer
+    model = ctrl._model
+    data = ctrl._data
+    renderer = mujoco.Renderer(model, height=height, width=width)
+
+    # Frame capture interval
+    coupling_dt_s = ctrl._coupling_dt_ms / 1000.0
+    steps_per_frame = max(1, int(1.0 / (fps * coupling_dt_s)))
+    n_total_steps = ctrl._n_steps_total
+
+    print(f"\n[2/3] Running simulation and capturing frames...")
+    print(f"  Total coupling steps: {n_total_steps}")
+    print(f"  Capturing every {steps_per_frame} steps ({fps} fps target)")
+
+    # Run and capture
+    writer = imageio.get_writer(
+        str(output_path), fps=fps, codec="libx264",
+        output_params=["-crf", "23", "-preset", "medium"],
+    )
+
+    t_sim_start = time.time()
+    step_count = 0
+    frame_count = 0
+
+    while not ctrl.done:
+        ctrl.step()
+        step_count += 1
+
+        if step_count % steps_per_frame == 0:
+            renderer.update_scene(data, camera=camera)
+            frame = renderer.render()
+            writer.append_data(frame)
+            frame_count += 1
+
+        if step_count % 250 == 0:
+            elapsed = time.time() - t_sim_start
+            pct = step_count / n_total_steps * 100
+            print(f"  Step {step_count}/{n_total_steps} ({pct:.0f}%) | "
+                  f"frames: {frame_count} | elapsed: {elapsed:.1f}s")
+
+    writer.close()
+    renderer.close()
+
+    sim_time = time.time() - t_sim_start
+    metrics = ctrl.get_metrics()
+    ctrl.close()
+
+    # Summary
+    print(f"\n[3/3] Summary")
+    print(f"  Simulation: {duration_s}s in {sim_time:.1f}s wall-clock")
+    print(f"  Frames captured: {frame_count}")
+    print(f"  Video saved: {output_path}")
+    if "forward_speed_mm_per_s" in metrics:
+        print(f"  Forward speed: {metrics['forward_speed_mm_per_s']:.4f} mm/s")
+        print(f"  Lateral deviation: {metrics['lateral_deviation_mm']:.4f} mm")
+    print("=" * 70)
+
+    return {
+        **metrics,
+        "output_path": str(output_path),
+        "frame_count": frame_count,
+        "wall_time_s": sim_time,
+    }
+
+
 def run_demo_video(duration_s=3.0, fps=30):
     """Entry point for CLI: renders both neural and tripod videos."""
     print("Rendering neural-driven demo video...")

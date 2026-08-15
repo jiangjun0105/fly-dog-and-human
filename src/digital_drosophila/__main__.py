@@ -225,9 +225,10 @@ def main():
     elif command == "demo":
         subcommand = args[1] if len(args) > 1 else "video"
 
-        # Parse --duration and --fps
+        # Parse --duration, --fps, --checkpoint
         duration = 3.0
         fps = 30
+        checkpoint = None
         for i, arg in enumerate(args[2:], start=2):
             if arg == "--duration" and i + 1 < len(args):
                 try:
@@ -241,6 +242,8 @@ def main():
                 except ValueError:
                     print(f"Invalid fps: {args[i + 1]!r}")
                     sys.exit(1)
+            elif arg == "--checkpoint" and i + 1 < len(args):
+                checkpoint = args[i + 1]
 
         if subcommand == "video":
             from .video import render_neural_video
@@ -254,10 +257,17 @@ def main():
             from .video import run_demo_video
 
             run_demo_video(duration_s=duration, fps=fps)
+        elif subcommand == "trained":
+            if checkpoint is None:
+                print("Error: --checkpoint path required for 'demo trained'")
+                sys.exit(1)
+            from .video import render_trained_video
+
+            render_trained_video(checkpoint, duration_s=duration, fps=fps)
         else:
             print(
                 "Usage: python -m digital_drosophila demo "
-                "<video|tripod|both> [--duration S] [--fps N]"
+                "<video|tripod|trained|both> [--duration S] [--fps N] [--checkpoint PATH]"
             )
             sys.exit(1)
 
