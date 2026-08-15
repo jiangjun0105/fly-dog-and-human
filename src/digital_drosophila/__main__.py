@@ -10,6 +10,7 @@ Usage:
     python -m digital_drosophila loop closed_loop
     python -m digital_drosophila loop episode_demo
     python -m digital_drosophila learn stdp_basic [--episodes N]
+    python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0]
     python -m digital_drosophila demo video [--duration 3.0] [--fps 30]
     python -m digital_drosophila demo tripod [--duration 3.0] [--fps 30]
     python -m digital_drosophila benchmark locomotion [--episodes 10] [--duration 5.0]
@@ -34,6 +35,7 @@ def main():
             "  loop closed_loop                          Run closed-loop co-simulation\n"
             "  loop episode_demo                         Run episode-based harness demo\n"
             "  learn stdp_basic [--episodes N]           Run STDP learning (default 10 episodes)\n"
+            "  learn train [--episodes N] [--episode-length S]  Extended training with homeostasis\n"
             "  benchmark <locomotion|chemotaxis|navigation>  Run benchmark suite"
         )
         sys.exit(1)
@@ -113,10 +115,33 @@ def main():
             from .learning import run_stdp_basic
 
             run_stdp_basic(episodes=episodes)
+
+        elif subcommand == "train":
+            # Parse --episodes and --episode-length flags
+            episodes = 50
+            episode_length = 2.0
+            for i, arg in enumerate(args[2:], start=2):
+                if arg == "--episodes" and i + 1 < len(args):
+                    try:
+                        episodes = int(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid episodes value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--episode-length" and i + 1 < len(args):
+                    try:
+                        episode_length = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid episode-length value: {args[i + 1]!r}")
+                        sys.exit(1)
+
+            from .training import run_training
+
+            run_training(episodes=episodes, episode_length=episode_length)
+
         else:
             print(
                 "Usage: python -m digital_drosophila learn "
-                "<stdp_basic> [--episodes N]"
+                "<stdp_basic|train> [--episodes N] [--episode-length S]"
             )
             sys.exit(1)
 

@@ -1,0 +1,833 @@
+"""Extended training harness with homeostatic plasticity and synaptic decay.
+
+Builds on the three-factor STDP in learning.py, adding:
+  1. Adaptive threshold (homeostatic plasticity): per-neuron threshold adjustment
+     based on measured firing rate vs target rate.
+  2. Synaptic decay: use-it-or-lose-it pruning of inactive synapses.
+  3. Checkpoint saving and structured training log output.
+
+Usage:
+    python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0]
+"""
+
+import json
+import os
+import time
+from pathlib import Path
+
+import numpy as np
+
+# Reports directory
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _PACKAGE_DIR.parent.parent
+_DEFAULT_REPORTS_DIR = _PROJECT_ROOT / "reports"
+
+
+class TrainingHarness:
+    """Episode-based training with homeostatic plasticity and synaptic decay.
+
+    Extends the three-factor STDP approach (eligibility trace + reward modulation)
+    with two stability mechanisms:
+
+      - Adaptive threshold: adjusts per-neuron firing threshold to keep each neuron
+        near a target firing rate, preventing silence or seizure-like activity.
+      - Synaptic decay: slowly decays inactive synapses (low eligibility trace),
+        implementing use-it-or-lose-it pruning.
+
+    Parameters
+    ----------
+    n_episodes : int
+        Number of training episodes.
+    episode_length_s : float
+        Duration of each episode in seconds.
+    coupling_dt_ms : float
+        Coupling timestep between neural and body simulators in milliseconds.
+    learning_rate : float
+        Weight change scale per update (in mV units).
+    tau_stdp_ms : float
+        STDP time window in milliseconds.
+    tau_eligibility_s : float
+        Eligibility trace decay time constant in seconds.
+    motor_gain : float
+        Amplitude of motor neuron rate-to-position conversion.
+    sensory_gain : float
+        Gain for sensory encoding in Amperes.
+    baseline_window : int
+        Number of recent rewards to average for baseline subtraction.
+    eta_homeo : float
+        Homeostatic threshold adjustment rate (mV per Hz deviation per episode).
+    target_rate : float
+        Target firing rate in Hz for homeostatic regulation.
+    lambda_decay : float
+        Synaptic decay rate per episode for inactive synapses.
+    eligibility_decay_threshold : float
+        Synapses with eligibility trace magnitude below this are considered
+        inactive and subject to decay.
+    checkpoint_interval : int
+        Save weight checkpoint every N episodes.
+    """
+
+    def __init__(
+        self,
+        n_episodes=50,
+        episode_length_s=2.0,
+        coupling_dt_ms=2.0,
+        learning_rate=0.001,
+        tau_stdp_ms=20.0,
+        tau_eligibility_s=1.0,
+        motor_gain=0.3,
+        sensory_gain=500e-12,
+        baseline_window=5,
+        eta_homeo=0.01,
+        target_rate=25.0,
+        lambda_decay=0.001,
+        eligibility_decay_threshold=0.01,
+        checkpoint_interval=10,
+    ):
+        self.n_episodes = n_episodes
+        self.episode_length_s = episode_length_s
+        self.coupling_dt_ms = coupling_dt_ms
+        self.learning_rate = learning_rate
+        self.tau_stdp_ms = tau_stdp_ms
+        self.tau_eligibility_s = tau_eligibility_s
+        self.motor_gain = motor_gain
+        self.sensory_gain = sensory_gain
+        self.baseline_window = baseline_window
+        self.eta_homeo = eta_homeo
+        self.target_rate = target_rate
+        self.lambda_decay = lambda_decay
+        self.eligibility_decay_threshold = eligibility_decay_threshold
+        self.checkpoint_interval = checkpoint_interval
+
+        # Set env vars before importing heavy dependencies
+        os.environ.setdefault("MUJOCO_GL", "egl")
+
+        # Build the simulation
+        self._build()
+
+    def _build(self):
+        """Build Brian2 network with adaptive-threshold neurons and STDP synapses."""
+        import brian2
+        brian2.prefs.codegen.target = "numpy"
+
+        from brian2 import (
+            Network, SpikeMonitor, PoissonGroup, Synapses, NeuronGroup,
+            Hz as brian_Hz, mV as brian_mV, ms as brian_ms, second as brian_second,
+            Mohm as brian_Mohm, pA,
+        )
+
+        from .network import (
+            load_sample_data,
+            create_poisson_drive,
+            create_background_drive,
+            DEFAULT_LIF_PARAMS,
+        )
+        from .constants import NT_SIGN_MAP
+        from .locomotion import build_simulation, settle_simulation
+        from .sensory_encoder import SensoryEncoder
+        from .motor_adapter import SpikeRateDecoder, MotorMapping
+
+        # --- Load data ---
+        adj, neurons_df = load_sample_data()
+        self._n_neurons = adj.shape[0]
+        self._neurons_df = neurons_df
+
+        self._motor_neuron_indices = neurons_df[
+            neurons_df["superclass"] == "vnc_motor"
+        ].index.tolist()
+        self._ascending_indices = neurons_df[
+            neurons_df["superclass"] == "ascending_neuron"
+        ].index.tolist()
+
+        # --- Build sign vector ---
+        nt_series = neurons_df["consensusNt"]
+        confidence = neurons_df["predictedNtConfidence"].values
+        self._sign_vector = np.array(
+            [NT_SIGN_MAP.get(nt, 0) or 0 for nt in nt_series]
+        )
+        self._confidence = confidence
+
+        # --- Build neuron group with adaptive threshold ---
+        # Modified LIF model: V_th_adapt is a per-neuron variable instead of
+        # a namespace constant. This allows homeostatic plasticity to raise/lower
+        # each neuron's threshold independently.
+        params = DEFAULT_LIF_PARAMS
+        tau_m = params["tau_m"]
+        V_rest = params["V_rest"]
+        V_reset = params["V_reset"]
+        R_membrane = params["R_membrane"]
+        t_refract = params["t_refract"]
+
+        eqs = """
+        dv/dt = (-(v - V_rest) + R_membrane * I) / tau_m : volt (unless refractory)
+        I : amp
+        V_th_adapt : volt
+        """
+
+        namespace = {
+            "tau_m": tau_m,
+            "V_rest": V_rest,
+            "V_reset": V_reset,
+            "R_membrane": R_membrane,
+        }
+
+        G = NeuronGroup(
+            self._n_neurons,
+            eqs,
+            threshold="v > V_th_adapt",
+            reset="v = V_reset",
+            refractory=t_refract,
+            method="euler",
+            namespace=namespace,
+        )
+        G.v = V_rest
+        # Initialize adaptive threshold to default -50 mV
+        G.V_th_adapt = -50 * brian_mV
+
+        # Store initial threshold values (in mV, unitless for numpy manipulation)
+        self._thresholds_mV = np.full(self._n_neurons, -50.0)
+
+        # --- Build STDP synapses (three-factor) ---
+        stdp_model = '''
+        w : volt
+        dApre/dt = -Apre / tau_stdp : 1 (event-driven)
+        dApost/dt = -Apost / tau_stdp : 1 (event-driven)
+        deligibility/dt = -eligibility / tau_e : 1 (clock-driven)
+        '''
+
+        stdp_pre = '''
+        v_post += w
+        Apre += 1.0
+        eligibility += Apost
+        '''
+
+        stdp_post = '''
+        Apost += 1.0
+        eligibility += Apre
+        '''
+
+        syn_namespace = {
+            'tau_stdp': self.tau_stdp_ms * brian_ms,
+            'tau_e': self.tau_eligibility_s * brian_second,
+        }
+
+        S = Synapses(
+            G, G,
+            model=stdp_model,
+            on_pre=stdp_pre,
+            on_post=stdp_post,
+            namespace=syn_namespace,
+        )
+
+        # Connect based on adjacency matrix
+        sources, targets = adj.nonzero()
+        S.connect(i=sources, j=targets)
+
+        # Set initial weights using sign-constrained formula
+        inh_attenuation = 0.5
+        scale = 0.6
+        sign_scale = np.where(
+            self._sign_vector[sources] >= 0, 1.0, inh_attenuation
+        )
+        weights_raw = (
+            np.log1p(adj[sources, targets])
+            * self._sign_vector[sources]
+            * confidence[sources]
+            * sign_scale
+            * scale
+        )
+        S.w = weights_raw * brian_mV
+
+        self._S = S
+        self._sources = sources
+        self._targets = targets
+        self._initial_weights = weights_raw.copy()
+
+        # --- Input drives ---
+        PG, S_input, _ = create_poisson_drive(
+            G, neurons_df, target_superclass="descending_neuron",
+            n_sources=15, rate=10 * brian_Hz, weight=2.0 * brian_mV,
+        )
+        PG_bg, S_bg = create_background_drive(
+            G, self._n_neurons, n_sources=50, rate=22 * brian_Hz, weight=1.3 * brian_mV,
+        )
+        M = SpikeMonitor(G)
+
+        # Assemble network
+        self._net = Network(G, S, PG, S_input, PG_bg, S_bg, M)
+        self._G = G
+        self._M = M
+
+        # Store initial state for reset
+        self._net.store("initial")
+
+        # --- FlyGym body ---
+        sim, fly, model, data, neutral_ctrl, actuator_names = build_simulation()
+        settle_simulation(sim, n_steps=2000)
+
+        self._sim = sim
+        self._fly = fly
+        self._model = model
+        self._data = data
+        self._neutral_ctrl = neutral_ctrl
+
+        # Save initial body state
+        self._initial_qpos = data.qpos.copy()
+        self._initial_qvel = data.qvel.copy()
+
+        # FlyGym physics steps per coupling step
+        flygym_dt_s = model.opt.timestep
+        self._flygym_steps_per_coupling = int(
+            self.coupling_dt_ms / (flygym_dt_s * 1000)
+        )
+
+        # --- Adapters ---
+        sensory_gain_pa = self.sensory_gain / 1e-12
+        self._encoder = SensoryEncoder(
+            self._ascending_indices, n_neurons=self._n_neurons, n_actuated=66,
+            gain_pa=sensory_gain_pa, vel_gain_pa=sensory_gain_pa * 0.6,
+        )
+        self._decoder = SpikeRateDecoder(
+            self._motor_neuron_indices, window_ms=50.0, dt_ms=self.coupling_dt_ms,
+        )
+        motor_map = MotorMapping(self._motor_neuron_indices)
+        self._mapping = motor_map.get_mapping()
+
+    def _reset_episode(self):
+        """Reset network and body for a new episode."""
+        import brian2
+        from brian2 import ms as brian_ms, mV as brian_mV, pA
+
+        # Reset Brian2 network
+        self._net.restore("initial")
+
+        # Restore current learned weights (initial state has the original weights)
+        self._S.w = self._current_weights * brian_mV
+
+        # Restore adaptive thresholds
+        self._G.V_th_adapt = self._thresholds_mV * brian_mV
+
+        # Reset body
+        self._data.qpos[:] = self._initial_qpos
+        self._data.qvel[:] = self._initial_qvel
+        self._data.ctrl[:] = self._neutral_ctrl
+        import mujoco
+        mujoco.mj_forward(self._model, self._data)
+
+        # Reset decoder
+        from .motor_adapter import SpikeRateDecoder
+        self._decoder = SpikeRateDecoder(
+            self._motor_neuron_indices, window_ms=50.0, dt_ms=self.coupling_dt_ms,
+        )
+
+        # Run 500ms burn-in
+        burn_in_ms = 500.0
+        self._G.I = 0 * pA
+        self._net.run(burn_in_ms * brian_ms)
+
+        # Track spike count baseline (for counting new spikes this episode)
+        self._prev_spike_count = self._M.num_spikes
+
+        # Record per-neuron spike counts at episode start for firing rate measurement
+        self._episode_spike_start = np.zeros(self._n_neurons)
+        # Count spikes per neuron from monitor up to this point
+        if self._M.num_spikes > 0:
+            spike_indices = np.array(self._M.i[:])
+            for idx in spike_indices:
+                self._episode_spike_start[idx] += 1
+
+        # Record start position
+        self._episode_start_pos = self._data.qpos[0:3].copy()
+
+        # Initialize sensory currents
+        joint_angles = self._sim.get_joint_angles("nmf")
+        body_vel = self._data.qvel[0:3].copy()
+        self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
+    def _run_episode(self):
+        """Run one episode of the closed-loop simulation."""
+        import brian2
+        from brian2 import ms as brian_ms, pA
+        from flygym.compose import ActuatorType
+        from .motor_adapter import decode_spikes_to_positions
+
+        n_steps = int(self.episode_length_s * 1000 / self.coupling_dt_ms)
+
+        for step in range(n_steps):
+            # 1. Inject sensory currents
+            self._G.I = 0 * pA
+            for idx in self._ascending_indices:
+                self._G.I[idx] = self._sensory_currents[idx] * brian2.amp
+
+            # 2. Run Brian2
+            self._net.run(self.coupling_dt_ms * brian_ms)
+
+            # 3. Decode motor spikes
+            current_spike_count = self._M.num_spikes
+            if current_spike_count > self._prev_spike_count:
+                new_spike_indices = np.array(self._M.i)[
+                    self._prev_spike_count:current_spike_count
+                ]
+                motor_spike_set = (
+                    set(new_spike_indices) & set(self._motor_neuron_indices)
+                )
+                self._decoder.update(motor_spike_set)
+            else:
+                self._decoder.update(set())
+            self._prev_spike_count = current_spike_count
+
+            rates = self._decoder.get_rates_hz()
+
+            # 4. Convert to actuator positions and step body
+            action = decode_spikes_to_positions(
+                rates, self._mapping, self._neutral_ctrl,
+                baseline_hz=15.0, amplitude=self.motor_gain,
+            )
+
+            for _ in range(self._flygym_steps_per_coupling):
+                self._sim.set_actuator_inputs("nmf", ActuatorType.POSITION, action)
+                self._sim.step()
+
+            # 5. Read sensors
+            joint_angles = self._sim.get_joint_angles("nmf")
+            body_vel = self._data.qvel[0:3].copy()
+            self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
+    def _compute_firing_rates(self):
+        """Compute per-neuron firing rate (Hz) during this episode.
+
+        Returns
+        -------
+        rates : ndarray
+            Firing rate per neuron in Hz.
+        """
+        # Count total spikes per neuron from the full monitor
+        spike_counts = np.zeros(self._n_neurons)
+        if self._M.num_spikes > 0:
+            spike_indices = np.array(self._M.i[:])
+            for idx in spike_indices:
+                spike_counts[idx] += 1
+
+        # Subtract the count at episode start to get episode-only spikes
+        episode_spikes = spike_counts - self._episode_spike_start
+        episode_spikes = np.maximum(episode_spikes, 0)
+
+        # Convert to Hz
+        rates = episode_spikes / self.episode_length_s
+        return rates
+
+    def _compute_reward(self):
+        """Compute reward from forward displacement."""
+        current_pos = self._data.qpos[0:3].copy()
+        displacement = current_pos - self._episode_start_pos
+        # Reward = forward distance in mm
+        return float(displacement[0])
+
+    def _update_weights(self, reward, rewards_history):
+        """Apply reward-modulated weight update using eligibility traces.
+
+        Parameters
+        ----------
+        reward : float
+            Reward for this episode (forward distance in mm).
+        rewards_history : list of float
+            All past rewards for baseline computation.
+
+        Returns
+        -------
+        stats : dict
+            Weight update statistics.
+        """
+        from brian2 import mV as brian_mV
+
+        # Compute dopamine signal (reward prediction error)
+        if len(rewards_history) >= 2:
+            recent = rewards_history[-min(self.baseline_window, len(rewards_history)):]
+            baseline = np.mean(recent)
+        else:
+            baseline = 0.0
+        dopamine = reward - baseline
+
+        # Read eligibility traces from synapses
+        eligibility = np.array(self._S.eligibility[:])
+
+        # Compute weight deltas
+        dw = self.learning_rate * eligibility * dopamine
+
+        # Apply update to current weights
+        self._current_weights = self._current_weights + dw
+
+        # Enforce sign constraint (Dale's principle)
+        excitatory_mask = self._sign_vector[self._sources] > 0
+        inhibitory_mask = self._sign_vector[self._sources] < 0
+
+        # Excitatory weights must stay >= 0
+        self._current_weights[excitatory_mask] = np.maximum(
+            self._current_weights[excitatory_mask], 0.0
+        )
+        # Inhibitory weights must stay <= 0
+        self._current_weights[inhibitory_mask] = np.minimum(
+            self._current_weights[inhibitory_mask], 0.0
+        )
+
+        # Return stats
+        return {
+            "dopamine": dopamine,
+            "mean_eligibility": float(np.mean(np.abs(eligibility))),
+            "mean_abs_dw": float(np.mean(np.abs(dw))),
+            "max_abs_dw": float(np.max(np.abs(dw))),
+            "weight_mean": float(np.mean(self._current_weights)),
+            "weight_std": float(np.std(self._current_weights)),
+        }
+
+    def _apply_homeostatic_plasticity(self, firing_rates):
+        """Adjust per-neuron thresholds based on measured firing rates.
+
+        Neurons firing above target_rate get a higher threshold (harder to fire).
+        Neurons firing below target_rate get a lower threshold (easier to fire).
+
+        Parameters
+        ----------
+        firing_rates : ndarray
+            Per-neuron firing rates in Hz for the most recent episode.
+
+        Returns
+        -------
+        stats : dict
+            Threshold adjustment statistics.
+        """
+        # Compute deviation from target rate
+        rate_deviation = firing_rates - self.target_rate
+
+        # Update thresholds: positive deviation -> raise threshold
+        delta_th = self.eta_homeo * rate_deviation
+        self._thresholds_mV = self._thresholds_mV + delta_th
+
+        # Clamp thresholds to reasonable range: [-70, -30] mV
+        # (V_rest is -70 mV; anything above -30 mV means the neuron is effectively dead)
+        self._thresholds_mV = np.clip(self._thresholds_mV, -70.0, -30.0)
+
+        return {
+            "threshold_mean": float(np.mean(self._thresholds_mV)),
+            "threshold_std": float(np.std(self._thresholds_mV)),
+            "threshold_min": float(np.min(self._thresholds_mV)),
+            "threshold_max": float(np.max(self._thresholds_mV)),
+            "mean_rate_deviation": float(np.mean(np.abs(rate_deviation))),
+            "neurons_above_target": int(np.sum(firing_rates > self.target_rate)),
+            "neurons_below_target": int(np.sum(firing_rates < self.target_rate)),
+        }
+
+    def _apply_synaptic_decay(self):
+        """Decay inactive synapses (those with low eligibility trace).
+
+        Only synapses whose absolute eligibility trace is below the decay threshold
+        are decayed. Active synapses (high eligibility) are preserved.
+
+        Returns
+        -------
+        stats : dict
+            Decay statistics.
+        """
+        # Read current eligibility traces
+        eligibility = np.array(self._S.eligibility[:])
+
+        # Identify inactive synapses (low eligibility)
+        inactive_mask = np.abs(eligibility) < self.eligibility_decay_threshold
+
+        # Apply decay only to inactive synapses
+        decay_factor = 1.0 - self.lambda_decay
+        self._current_weights[inactive_mask] *= decay_factor
+
+        # Enforce sign constraint after decay (decay toward zero, so this
+        # should already be satisfied, but enforce for safety)
+        excitatory_mask = self._sign_vector[self._sources] > 0
+        inhibitory_mask = self._sign_vector[self._sources] < 0
+        self._current_weights[excitatory_mask] = np.maximum(
+            self._current_weights[excitatory_mask], 0.0
+        )
+        self._current_weights[inhibitory_mask] = np.minimum(
+            self._current_weights[inhibitory_mask], 0.0
+        )
+
+        n_decayed = int(np.sum(inactive_mask))
+        n_total = len(self._current_weights)
+
+        return {
+            "n_decayed": n_decayed,
+            "n_total": n_total,
+            "fraction_decayed": float(n_decayed / n_total) if n_total > 0 else 0.0,
+            "mean_abs_weight_after": float(np.mean(np.abs(self._current_weights))),
+        }
+
+    def _save_checkpoint(self, episode, checkpoint_dir):
+        """Save weight checkpoint to disk.
+
+        Parameters
+        ----------
+        episode : int
+            Current episode number (1-based).
+        checkpoint_dir : Path
+            Directory for checkpoint files.
+        """
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = checkpoint_dir / f"weights_ep{episode:04d}.npz"
+        np.savez_compressed(
+            checkpoint_path,
+            weights=self._current_weights,
+            thresholds=self._thresholds_mV,
+            episode=episode,
+        )
+        return checkpoint_path
+
+    def train(self):
+        """Run the full training loop with homeostatic plasticity and synaptic decay.
+
+        Returns
+        -------
+        results : dict
+            Keys: rewards, weight_stats, homeostatic_stats, decay_stats,
+            firing_rates, episode_times, final_weights, final_thresholds.
+        """
+        print("=" * 70)
+        print("Training Harness: STDP + Homeostatic Plasticity + Synaptic Decay")
+        print(f"  Episodes: {self.n_episodes}")
+        print(f"  Episode length: {self.episode_length_s}s")
+        print(f"  Learning rate: {self.learning_rate} mV")
+        print(f"  STDP tau: {self.tau_stdp_ms} ms")
+        print(f"  Eligibility tau: {self.tau_eligibility_s} s")
+        print(f"  Homeostatic eta: {self.eta_homeo} mV/Hz")
+        print(f"  Target rate: {self.target_rate} Hz")
+        print(f"  Synaptic decay lambda: {self.lambda_decay}")
+        print(f"  Checkpoint interval: every {self.checkpoint_interval} episodes")
+        print("=" * 70)
+
+        # Prepare output directories
+        checkpoint_dir = _DEFAULT_REPORTS_DIR / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize current weights from initial weights
+        self._current_weights = self._initial_weights.copy()
+
+        rewards = []
+        weight_stats_list = []
+        homeostatic_stats_list = []
+        decay_stats_list = []
+        firing_rates_list = []
+        episode_times = []
+
+        t_total_start = time.time()
+
+        for ep in range(self.n_episodes):
+            ep_num = ep + 1
+            print(f"\n--- Episode {ep_num}/{self.n_episodes} ---")
+            t_ep_start = time.time()
+
+            # Reset and run episode
+            self._reset_episode()
+            self._run_episode()
+
+            # Compute reward
+            reward = self._compute_reward()
+            rewards.append(reward)
+
+            # Compute per-neuron firing rates
+            firing_rates = self._compute_firing_rates()
+            mean_rate = float(np.mean(firing_rates))
+            firing_rates_list.append(mean_rate)
+
+            # Update weights via reward-modulated STDP
+            w_stats = self._update_weights(reward, rewards)
+            weight_stats_list.append(w_stats)
+
+            # Apply homeostatic plasticity (between episodes)
+            h_stats = self._apply_homeostatic_plasticity(firing_rates)
+            homeostatic_stats_list.append(h_stats)
+
+            # Apply synaptic decay (between episodes)
+            d_stats = self._apply_synaptic_decay()
+            decay_stats_list.append(d_stats)
+
+            t_ep = time.time() - t_ep_start
+            episode_times.append(t_ep)
+
+            # Print episode summary
+            print(f"  Reward (forward distance): {reward:.6f} mm")
+            print(f"  Mean firing rate: {mean_rate:.1f} Hz "
+                  f"(target: {self.target_rate} Hz)")
+            print(f"  Dopamine signal: {w_stats['dopamine']:.6f}")
+            print(f"  Threshold: mean={h_stats['threshold_mean']:.2f} mV, "
+                  f"std={h_stats['threshold_std']:.3f} mV")
+            print(f"  Neurons above/below target: "
+                  f"{h_stats['neurons_above_target']}/{h_stats['neurons_below_target']}")
+            print(f"  Synapses decayed: {d_stats['n_decayed']}/{d_stats['n_total']} "
+                  f"({d_stats['fraction_decayed']:.1%})")
+            print(f"  Weight: mean={w_stats['weight_mean']:.6f}, "
+                  f"std={w_stats['weight_std']:.6f} mV")
+            print(f"  Episode wall time: {t_ep:.1f}s")
+
+            # Verify sign constraint
+            exc_mask = self._sign_vector[self._sources] > 0
+            inh_mask = self._sign_vector[self._sources] < 0
+            n_exc_violations = np.sum(self._current_weights[exc_mask] < 0)
+            n_inh_violations = np.sum(self._current_weights[inh_mask] > 0)
+            if n_exc_violations > 0 or n_inh_violations > 0:
+                print(f"  WARNING: Sign violations! exc={n_exc_violations}, "
+                      f"inh={n_inh_violations}")
+
+            # Save checkpoint periodically
+            if ep_num % self.checkpoint_interval == 0 or ep_num == self.n_episodes:
+                ckpt_path = self._save_checkpoint(ep_num, checkpoint_dir)
+                print(f"  Checkpoint saved: {ckpt_path.name}")
+
+        total_time = time.time() - t_total_start
+
+        # Final summary
+        print(f"\n{'=' * 70}")
+        print("TRAINING COMPLETE")
+        print(f"{'=' * 70}")
+        print(f"  Total episodes: {self.n_episodes}")
+        print(f"  Total time: {total_time:.1f}s "
+              f"(avg {total_time / self.n_episodes:.1f}s/episode)")
+        print(f"\n  Reward stats:")
+        print(f"    Mean: {np.mean(rewards):.6f} mm")
+        print(f"    Std: {np.std(rewards):.6f} mm")
+        print(f"    First half mean: {np.mean(rewards[:len(rewards)//2]):.6f} mm")
+        print(f"    Second half mean: {np.mean(rewards[len(rewards)//2:]):.6f} mm")
+        print(f"\n  Final threshold stats:")
+        print(f"    Mean: {np.mean(self._thresholds_mV):.2f} mV")
+        print(f"    Std: {np.std(self._thresholds_mV):.3f} mV")
+        print(f"    Range: [{np.min(self._thresholds_mV):.2f}, "
+              f"{np.max(self._thresholds_mV):.2f}] mV")
+        print(f"\n  Weight change from initial: "
+              f"{np.sum(np.abs(self._current_weights - self._initial_weights)):.6f} mV")
+        print(f"  Mean absolute weight: "
+              f"{np.mean(np.abs(self._current_weights)):.6f} mV")
+        print(f"{'=' * 70}")
+
+        return {
+            "rewards": rewards,
+            "weight_stats": weight_stats_list,
+            "homeostatic_stats": homeostatic_stats_list,
+            "decay_stats": decay_stats_list,
+            "firing_rates": firing_rates_list,
+            "episode_times": episode_times,
+            "final_weights": self._current_weights.copy(),
+            "final_thresholds": self._thresholds_mV.copy(),
+            "initial_weights": self._initial_weights.copy(),
+        }
+
+    def save_results(self, results, path=None):
+        """Save training log to JSON.
+
+        Parameters
+        ----------
+        results : dict
+            Output from train().
+        path : str or Path, optional
+            Output path. Defaults to reports/training_log.json.
+
+        Returns
+        -------
+        path : Path
+            Path to the saved log file.
+        """
+        if path is None:
+            path = _DEFAULT_REPORTS_DIR / "training_log.json"
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Build serializable log
+        log = {
+            "config": {
+                "n_episodes": self.n_episodes,
+                "episode_length_s": self.episode_length_s,
+                "coupling_dt_ms": self.coupling_dt_ms,
+                "learning_rate": self.learning_rate,
+                "tau_stdp_ms": self.tau_stdp_ms,
+                "tau_eligibility_s": self.tau_eligibility_s,
+                "motor_gain": self.motor_gain,
+                "sensory_gain": self.sensory_gain,
+                "eta_homeo": self.eta_homeo,
+                "target_rate": self.target_rate,
+                "lambda_decay": self.lambda_decay,
+                "eligibility_decay_threshold": self.eligibility_decay_threshold,
+            },
+            "episodes": [],
+        }
+
+        for i in range(len(results["rewards"])):
+            episode_entry = {
+                "episode": i + 1,
+                "reward": results["rewards"][i],
+                "mean_firing_rate": results["firing_rates"][i],
+                "wall_time_s": results["episode_times"][i],
+                "weight_stats": results["weight_stats"][i],
+                "homeostatic_stats": results["homeostatic_stats"][i],
+                "decay_stats": results["decay_stats"][i],
+            }
+            log["episodes"].append(episode_entry)
+
+        # Summary statistics
+        rewards = results["rewards"]
+        log["summary"] = {
+            "total_episodes": len(rewards),
+            "total_wall_time_s": sum(results["episode_times"]),
+            "reward_mean": float(np.mean(rewards)),
+            "reward_std": float(np.std(rewards)),
+            "reward_first_half_mean": float(np.mean(rewards[:len(rewards)//2])),
+            "reward_second_half_mean": float(np.mean(rewards[len(rewards)//2:])),
+            "final_threshold_mean": float(np.mean(results["final_thresholds"])),
+            "final_threshold_std": float(np.std(results["final_thresholds"])),
+            "final_weight_mean": float(np.mean(results["final_weights"])),
+            "final_weight_std": float(np.std(results["final_weights"])),
+        }
+
+        with open(path, "w") as f:
+            json.dump(log, f, indent=2)
+
+        print(f"Training log saved: {path}")
+        return path
+
+    def close(self):
+        """Clean up resources."""
+        if hasattr(self, "_sim") and self._sim is not None:
+            self._sim.close()
+            self._sim = None
+
+
+def run_training(episodes=50, episode_length=2.0):
+    """Run the training harness with homeostatic plasticity and synaptic decay.
+
+    Parameters
+    ----------
+    episodes : int
+        Number of training episodes.
+    episode_length : float
+        Episode length in seconds.
+    """
+    print(f"\nStarting training harness with {episodes} episodes "
+          f"({episode_length}s each)...\n")
+
+    harness = TrainingHarness(
+        n_episodes=episodes,
+        episode_length_s=episode_length,
+        coupling_dt_ms=2.0,
+        learning_rate=0.001,
+        tau_stdp_ms=20.0,
+        tau_eligibility_s=1.0,
+        motor_gain=0.3,
+        sensory_gain=500e-12,
+        baseline_window=5,
+        eta_homeo=0.01,
+        target_rate=25.0,
+        lambda_decay=0.001,
+        eligibility_decay_threshold=0.01,
+        checkpoint_interval=10,
+    )
+
+    try:
+        results = harness.train()
+        log_path = harness.save_results(results)
+        print(f"\nDone. Training log: {log_path}")
+    finally:
+        harness.close()
