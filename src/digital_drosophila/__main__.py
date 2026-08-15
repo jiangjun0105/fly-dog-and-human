@@ -9,6 +9,7 @@ Usage:
     python -m digital_drosophila loop motor_test
     python -m digital_drosophila loop closed_loop
     python -m digital_drosophila loop episode_demo
+    python -m digital_drosophila learn stdp_basic [--episodes N]
 """
 
 import sys
@@ -26,7 +27,8 @@ def main():
             "  body locomotion                           Run scripted locomotion demo\n"
             "  loop motor_test                           Run motor output adapter test\n"
             "  loop closed_loop                          Run closed-loop co-simulation\n"
-            "  loop episode_demo                         Run episode-based harness demo"
+            "  loop episode_demo                         Run episode-based harness demo\n"
+            "  learn stdp_basic [--episodes N]           Run STDP learning (default 10 episodes)"
         )
         sys.exit(1)
 
@@ -88,8 +90,32 @@ def main():
             )
             sys.exit(1)
 
+    elif command == "learn":
+        subcommand = args[1] if len(args) > 1 else ""
+
+        if subcommand == "stdp_basic":
+            # Parse --episodes flag
+            episodes = 10
+            for i, arg in enumerate(args[2:], start=2):
+                if arg == "--episodes" and i + 1 < len(args):
+                    try:
+                        episodes = int(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid episodes value: {args[i + 1]!r}")
+                        sys.exit(1)
+
+            from .learning import run_stdp_basic
+
+            run_stdp_basic(episodes=episodes)
+        else:
+            print(
+                "Usage: python -m digital_drosophila learn "
+                "<stdp_basic> [--episodes N]"
+            )
+            sys.exit(1)
+
     else:
-        print(f"Unknown command: {command!r}. Choose from: simulate, body, loop")
+        print(f"Unknown command: {command!r}. Choose from: simulate, body, loop, learn")
         sys.exit(1)
 
 
