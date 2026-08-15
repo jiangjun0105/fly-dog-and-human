@@ -2,7 +2,7 @@
 id: 2026-08-15-sensorimotor-harness
 title: "Co-simulation harness with episode API and visualization"
 created: 2026-08-15T16:30
-status: open
+status: done
 priority: medium
 type: task
 suitability: auto_agent_ready
