@@ -23,7 +23,25 @@ from .plotting import plot_raster_minimal, plot_raster
 # Reports directory (project root / reports)
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _PACKAGE_DIR.parent.parent  # src/ -> project root
-_REPORTS_DIR = _PROJECT_ROOT / "reports"
+_DEFAULT_REPORTS_DIR = _PROJECT_ROOT / "reports"
+
+
+def _resolve_reports_dir(output_dir=None):
+    """Resolve the reports directory.
+
+    Priority:
+    1. Explicit *output_dir* argument (if provided).
+    2. DIGITAL_DROSOPHILA_REPORTS_DIR environment variable.
+    3. Computed default (_DEFAULT_REPORTS_DIR).
+    """
+    import os
+
+    if output_dir is not None:
+        return Path(output_dir)
+    env_dir = os.environ.get("DIGITAL_DROSOPHILA_REPORTS_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return _DEFAULT_REPORTS_DIR
 
 
 def compute_firing_rates(spike_monitor, neurons_df, duration_s=1.0):
@@ -73,11 +91,17 @@ def validate_rates(rates, min_hz=1.0, max_hz=30.0):
     return all(min_hz <= r <= max_hz for r in rates.values())
 
 
-def run_minimal():
+def run_minimal(output_dir=None):
     """Run the minimal (raw-weight) simulation.
 
     Loads connectome data, builds a 100-neuron LIF network with raw synapse-count
     weights, drives descending neurons with Poisson input, and produces a raster plot.
+
+    Parameters
+    ----------
+    output_dir : str or Path, optional
+        Directory to write output reports. Falls back to
+        DIGITAL_DROSOPHILA_REPORTS_DIR env var, then the computed default.
     """
     # Ensure numpy codegen is set before any Brian2 objects are created
     prefs.codegen.target = "numpy"
@@ -116,17 +140,24 @@ def run_minimal():
     print(f"Mean rate: {M.num_spikes / n:.1f} Hz")
 
     # Plot raster
-    output_path = _REPORTS_DIR / "brian2_minimal_raster.png"
+    reports_dir = _resolve_reports_dir(output_dir)
+    output_path = reports_dir / "brian2_minimal_raster.png"
     title = f"Raster plot — {M.num_spikes} spikes from {n} LIF neurons (1s)"
     plot_raster_minimal(M, title, output_path)
 
 
-def run_constrained():
+def run_constrained(output_dir=None):
     """Run the biologically-constrained simulation.
 
     Loads connectome data, builds a 100-neuron LIF network with sign-constrained
     weights (Dale's principle), background drive, and produces a color-coded
     raster plot with per-superclass firing rate statistics.
+
+    Parameters
+    ----------
+    output_dir : str or Path, optional
+        Directory to write output reports. Falls back to
+        DIGITAL_DROSOPHILA_REPORTS_DIR env var, then the computed default.
     """
     # Ensure numpy codegen is set before any Brian2 objects are created
     prefs.codegen.target = "numpy"
@@ -151,7 +182,7 @@ def run_constrained():
     print(f"  excitatory: {n_excitatory} (acetylcholine, sign=+1)")
     print(f"  inhibitory: {n_inhibitory} (gaba, sign=-1)")
     print(f"  unclear: {n_unclear} (unclear NT, sign=0)")
-    print(f"  ratio (E/I): {n_excitatory}/{n_inhibitory} = {n_excitatory/n_inhibitory:.2f}")
+    print(f"  ratio (E/I): {n_excitatory}/{n_inhibitory} = {n_excitatory/max(n_inhibitory, 1):.2f}")
 
     # Create neuron group
     G = create_neuron_group(n)
@@ -208,7 +239,8 @@ def run_constrained():
         print("\n  WARNING: Some rates outside 1-30 Hz range — consider tuning scale factor")
 
     # Color-coded raster plot
-    output_path = _REPORTS_DIR / "brian2_constrained_raster.png"
+    reports_dir = _resolve_reports_dir(output_dir)
+    output_path = reports_dir / "brian2_constrained_raster.png"
     title = (
         f"Biologically-constrained raster — {M.num_spikes} spikes, "
         f"{n} LIF neurons (E:{n_excitatory}/I:{n_inhibitory}/U:{n_unclear})"
