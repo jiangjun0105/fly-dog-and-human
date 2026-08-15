@@ -1,38 +1,37 @@
-# MuJoCo + NeuroMechFly Environment Setup
+# EPIC — MuJoCo + NeuroMechFly Environment Setup
+
+**EPIC — container, do not execute; work lives in child issues.**
 
 **Parent:** epic-phase1-implementation
 
-## Desired Behavior
+## Epic Demo
 
-Install MuJoCo and NeuroMechFly, verify the Drosophila body model runs, and characterize the
-motor/sensory interface so we know exactly how to connect the neural network.
+Run a script that loads the NeuroMechFly Drosophila model in MuJoCo, applies a scripted
+sinusoidal gait, the fly walks forward, and prints the full motor/sensory interface mapping
+(actuator names → joints → motor neuron types; sensor names → signal types → vector shapes).
 
-### Demo
+## Children (value-sliced: skateboard → bicycle → car)
 
-Run a script that:
-1. Loads the NeuroMechFly Drosophila model in MuJoCo
-2. Applies a scripted sinusoidal torque pattern to leg actuators
-3. The fly performs a simple gait (even if crude/hardcoded)
-4. Prints a mapping table: motor neuron type → actuator name → joint
-5. Prints available sensory signals: joint angles, contact forces, body velocity
+1. **[Skateboard — MuJoCo + FlyGym install and hello-world](2026-08-15-mujoco-install-verify.md)**: Install packages, load fly model, step the sim, see it move
+2. **[Bicycle — Scripted locomotion + interface characterization](2026-08-15-mujoco-locomotion-interface.md)**: Apply CPG gait, characterize motor/sensory interface, produce mapping tables
 
-### Tasks (estimated)
+## Dependency Spine
 
-1. **MuJoCo installation** — Install MuJoCo (pip install mujoco), verify with a minimal headless render test (~1 task)
-2. **NeuroMechFly installation** — Install NeuroMechFly package, load the Drosophila MJCF model, verify it renders/steps without error (~1 task)
-3. **Scripted locomotion test** — Apply sinusoidal joint torques (CPG-like pattern) to all 6 legs, run simulation, verify the body moves forward. Record video or screenshot as evidence (~1-2 tasks)
-4. **Motor interface characterization** — Document the full mapping from NeuroMechFly actuator names to anatomical joints. Cross-reference with the 702 motor neurons (142 unique types) from the connectome. Produce a mapping table: `motor_neuron_type → actuator(s)` (~2 tasks)
-5. **Sensory interface characterization** — Document all sensor outputs NeuroMechFly provides: proprioception (joint angles/velocities), contact sensors (tarsal ground contact), body state (position, velocity, orientation). Define the input vector shape for the neural network (~1 task)
+```
+Issue 2.1 (install + verify) → Issue 2.2 (locomotion + interface mapping)
+```
 
-### Key References
+Linear — 2.1 proves the environment works, 2.2 characterizes what Epic 3 needs to connect to.
+
+## Key References
 
 - `docs/neuroscience/01-connectome-terminology.md` — motor neuron types (702 neurons, 142 types)
-- `docs/neuroscience/02-lif-model-design.md` — discusses motor output interface
-- NeuroMechFly paper: Lobato-Rios et al. (2022) — fly body model for MuJoCo
-- `docs/environment-setup.md` — existing environment setup patterns
+- `docs/neuroscience/02-lif-model-design.md` — motor output interface
+- NeuroMechFly/FlyGym: Lobato-Rios et al. — fly body model for MuJoCo
+- `docs/environment-setup.md` — existing setup patterns
 
-### Open Questions
+## Open Questions
 
-- NeuroMechFly v1 or v2? v2 has more actuators and better sensor models. Recommend: check latest release.
-- Headless rendering sufficient or do we need a viewer? Recommend: headless for CI/automation, viewer optional for debugging.
-- Degree of motor neuron → actuator mapping fidelity at this stage? Recommend: coarse mapping (neuron type → joint group) is sufficient for Child 3; refine in Child 4 if needed.
+- FlyGym (the successor package to NeuroMechFly) vs raw NeuroMechFly? FlyGym is actively maintained and provides a Gymnasium-compatible API. Recommend: use FlyGym.
+- Headless rendering sufficient? Yes for automation; viewer optional for debugging.
+- Motor mapping fidelity? Coarse (neuron type → joint group) is sufficient for Epic 3.
