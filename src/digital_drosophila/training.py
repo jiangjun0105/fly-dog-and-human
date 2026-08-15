@@ -1312,3 +1312,92 @@ def run_experiment(episodes=50, episode_length=2.0):
     with open(comparison_path, "w") as f:
         json.dump(comparison, f, indent=2)
     print(f"\nComparison saved: {comparison_path}")
+
+
+def plot_training_log(log_path=None, output_path=None):
+    """Generate learning curve plot from a training log JSON.
+
+    Parameters
+    ----------
+    log_path : str or Path, optional
+        Path to training_log.json. Defaults to reports/training_log.json.
+    output_path : str or Path, optional
+        Output image path. Defaults to reports/learning_curve.png.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if log_path is None:
+        log_path = _DEFAULT_REPORTS_DIR / "training_log.json"
+    log_path = Path(log_path)
+
+    if output_path is None:
+        output_path = log_path.parent / (log_path.stem + "_curve.png")
+    output_path = Path(output_path)
+
+    with open(log_path) as f:
+        log = json.load(f)
+
+    episodes_data = log["episodes"]
+    n_eps = len(episodes_data)
+    ep_nums = np.arange(1, n_eps + 1)
+
+    rewards = [e["reward"] for e in episodes_data]
+    firing_rates = [e["mean_firing_rate"] for e in episodes_data]
+    th_means = [e["homeostatic_stats"]["threshold_mean"] for e in episodes_data]
+    th_stds = [e["homeostatic_stats"]["threshold_std"] for e in episodes_data]
+
+    fig, axes = plt.subplots(4, 1, figsize=(10, 12))
+
+    # Panel 1: Reward
+    ax = axes[0]
+    ax.plot(ep_nums, rewards, "o-", color="tab:blue", linewidth=1.5, markersize=4)
+    if n_eps >= 5:
+        window = min(5, n_eps)
+        rm = np.convolve(rewards, np.ones(window) / window, mode="valid")
+        ax.plot(np.arange(window, n_eps + 1), rm, "--", color="tab:red",
+                linewidth=2, label=f"{window}-ep running mean")
+        ax.legend(fontsize=9)
+    ax.set_ylabel("Forward Distance (mm)")
+    ax.set_title(f"Training: {log['config'].get('topology', 'biological')} topology")
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color="gray", linestyle=":", alpha=0.5)
+
+    # Panel 2: Firing rate
+    ax = axes[1]
+    ax.plot(ep_nums, firing_rates, "o-", color="tab:green", linewidth=1.5, markersize=4)
+    ax.axhline(log["config"]["target_rate"], color="tab:red", linestyle="--",
+               linewidth=1, label=f"target ({log['config']['target_rate']} Hz)")
+    ax.set_ylabel("Mean Firing Rate (Hz)")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 3: Threshold adaptation
+    ax = axes[2]
+    th_means_arr = np.array(th_means)
+    th_stds_arr = np.array(th_stds)
+    ax.plot(ep_nums, th_means_arr, "o-", color="tab:purple", linewidth=1.5, markersize=4)
+    ax.fill_between(ep_nums, th_means_arr - th_stds_arr, th_means_arr + th_stds_arr,
+                    color="tab:purple", alpha=0.2)
+    ax.set_ylabel("Threshold Mean ± Std (mV)")
+    ax.grid(True, alpha=0.3)
+
+    # Panel 4: Weight stats
+    ax = axes[3]
+    w_means = [e["weight_stats"]["weight_mean"] for e in episodes_data]
+    w_stds = [e["weight_stats"]["weight_std"] for e in episodes_data]
+    ax.plot(ep_nums, w_means, "o-", color="tab:orange", linewidth=1.5, markersize=4,
+            label="Weight mean")
+    ax.plot(ep_nums, w_stds, "s-", color="tab:cyan", linewidth=1, markersize=3,
+            alpha=0.7, label="Weight std")
+    ax.set_ylabel("Weight (mV)")
+    ax.set_xlabel("Episode")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Learning curve plot saved: {output_path}")
+    return output_path
