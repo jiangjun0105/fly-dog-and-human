@@ -2,7 +2,7 @@
 id: 2026-08-15-mujoco-install-verify
 title: "Install MuJoCo + FlyGym and verify Drosophila model loads"
 created: 2026-08-15T14:00
-status: open
+status: done
 priority: high
 type: task
 suitability: auto_agent_ready

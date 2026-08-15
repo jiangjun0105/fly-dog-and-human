@@ -2,7 +2,7 @@
 id: 2026-08-15-brian2-full-scale
 title: "Scale Brian2 network to full VNC connectome with burn-in validation"
 created: 2026-08-15T12:00
-status: open
+status: done
 priority: medium
 type: task
 suitability: needs_human

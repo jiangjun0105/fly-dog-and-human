@@ -2,7 +2,7 @@
 id: 2026-08-15-sensorimotor-motor-output
 title: "Motor output adapter: Brian2 motor neuron spikes → FlyGym actuator positions"
 created: 2026-08-15T15:30
-status: open
+status: done
 priority: high
 type: task
 suitability: auto_agent_ready
