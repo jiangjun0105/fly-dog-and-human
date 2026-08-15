@@ -2,7 +2,7 @@
 id: 2026-08-15-gpu-training-integration
 title: "Integrate PyGeNN backend into training harness"
 created: 2026-08-15T19:40
-status: open
+status: done
 priority: high
 type: feature
 area: gpu

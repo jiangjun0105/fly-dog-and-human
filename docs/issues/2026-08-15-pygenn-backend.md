@@ -2,7 +2,7 @@
 id: 2026-08-15-pygenn-backend
 title: "PyGeNN neural backend with STDP eligibility tracking"
 created: 2026-08-15T19:40
-status: open
+status: done
 priority: high
 type: feature
 area: gpu
