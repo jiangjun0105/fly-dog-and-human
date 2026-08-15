@@ -2,7 +2,7 @@
 id: 2026-08-15-sensorimotor-closed-loop
 title: "Close the sensorimotor loop: sensory encoding + bidirectional neural-body coupling"
 created: 2026-08-15T16:00
-status: open
+status: done
 priority: high
 type: task
 suitability: auto_agent_ready
