@@ -5,6 +5,7 @@ Usage:
     python -m digital_drosophila simulate constrained
     python -m digital_drosophila body verify
     python -m digital_drosophila body locomotion
+    python -m digital_drosophila loop motor_test
 """
 
 import sys
@@ -19,7 +20,8 @@ def main():
             "\nCommands:\n"
             "  simulate <minimal|constrained>   Run SNN simulation\n"
             "  body verify                      Verify MuJoCo/FlyGym installation\n"
-            "  body locomotion                  Run scripted locomotion demo"
+            "  body locomotion                  Run scripted locomotion demo\n"
+            "  loop motor_test                  Run motor output adapter test"
         )
         sys.exit(1)
 
@@ -58,8 +60,21 @@ def main():
             )
             sys.exit(1)
 
+    elif command == "loop":
+        subcommand = args[1] if len(args) > 1 else ""
+
+        if subcommand == "motor_test":
+            from .motor_adapter import run_motor_test
+
+            run_motor_test()
+        else:
+            print(
+                "Usage: python -m digital_drosophila loop <motor_test>"
+            )
+            sys.exit(1)
+
     else:
-        print(f"Unknown command: {command!r}. Choose from: simulate, body")
+        print(f"Unknown command: {command!r}. Choose from: simulate, body, loop")
         sys.exit(1)
 
 
