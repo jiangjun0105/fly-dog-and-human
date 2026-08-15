@@ -117,6 +117,64 @@ def load_connectivity(body_ids: tuple[int, ...], n: int) -> np.ndarray:
     return adj
 
 
+@memory.cache
+def load_connectivity_sparse(body_ids: tuple[int, ...], batch_size: int = 5000) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load pairwise connectivity as sparse COO arrays (source_idx, target_idx, weight).
+
+    Queries neuPrint in batches to handle large neuron sets. Returns indices
+    relative to the *body_ids* ordering (0-based).
+
+    Parameters
+    ----------
+    body_ids : tuple[int, ...]
+        Ordered tuple of body IDs defining the network.
+    batch_size : int
+        Number of body IDs to query per batch (neuPrint has limits).
+
+    Returns
+    -------
+    sources : ndarray[int32]
+        Presynaptic neuron indices (into body_ids).
+    targets : ndarray[int32]
+        Postsynaptic neuron indices (into body_ids).
+    weights : ndarray[float32]
+        Synapse weights (sum of ROI-level connections).
+    """
+    connect()
+    all_ids = list(body_ids)
+    id_to_idx = {bid: i for i, bid in enumerate(all_ids)}
+    n = len(all_ids)
+
+    all_pre = []
+    all_post = []
+    all_w = []
+
+    # Query in batches: for each batch of source neurons, find all connections
+    # to any neuron in the full set
+    full_criteria = NeuronCriteria(bodyId=all_ids)
+    for start in range(0, n, batch_size):
+        batch_ids = all_ids[start:start + batch_size]
+        batch_criteria = NeuronCriteria(bodyId=batch_ids)
+        print(f"  Fetching connectivity batch {start // batch_size + 1} "
+              f"({start}:{start + len(batch_ids)} of {n})...")
+        _, conn_df = fetch_adjacencies(batch_criteria, full_criteria)
+        if conn_df.empty:
+            continue
+        agg = conn_df.groupby(["bodyId_pre", "bodyId_post"])["weight"].sum().reset_index()
+        for _, row in agg.iterrows():
+            pre_id, post_id, w = int(row["bodyId_pre"]), int(row["bodyId_post"]), float(row["weight"])
+            if pre_id in id_to_idx and post_id in id_to_idx:
+                all_pre.append(id_to_idx[pre_id])
+                all_post.append(id_to_idx[post_id])
+                all_w.append(w)
+
+    sources = np.array(all_pre, dtype=np.int32)
+    targets = np.array(all_post, dtype=np.int32)
+    weights = np.array(all_w, dtype=np.float32)
+    print(f"  Loaded {len(sources)} pairwise connections for {n} neurons")
+    return sources, targets, weights
+
+
 def find_nt_column(df: pd.DataFrame) -> str | None:
     for col in ["consensusNt", "predictedNt", "celltypePredictedNt"]:
         if col in df.columns and df[col].notna().any():

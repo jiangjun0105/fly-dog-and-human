@@ -3,8 +3,10 @@
 Usage:
     python -m digital_drosophila simulate minimal
     python -m digital_drosophila simulate constrained
+    python -m digital_drosophila simulate full_vnc
     python -m digital_drosophila body verify
     python -m digital_drosophila body locomotion
+    python -m digital_drosophila loop motor_test
 """
 
 import sys
@@ -17,9 +19,10 @@ def main():
         print(
             "Usage: python -m digital_drosophila <command> [subcommand]\n"
             "\nCommands:\n"
-            "  simulate <minimal|constrained>   Run SNN simulation\n"
-            "  body verify                      Verify MuJoCo/FlyGym installation\n"
-            "  body locomotion                  Run scripted locomotion demo"
+            "  simulate <minimal|constrained|full_vnc>   Run SNN simulation\n"
+            "  body verify                               Verify MuJoCo/FlyGym installation\n"
+            "  body locomotion                           Run scripted locomotion demo\n"
+            "  loop motor_test                           Run motor output adapter test"
         )
         sys.exit(1)
 
@@ -28,11 +31,12 @@ def main():
     if command == "simulate":
         mode = args[1] if len(args) > 1 else "constrained"
 
-        from .simulate import run_minimal, run_constrained
+        from .simulate import run_minimal, run_constrained, run_full_vnc
 
         modes = {
             "minimal": run_minimal,
             "constrained": run_constrained,
+            "full_vnc": run_full_vnc,
         }
 
         if mode not in modes:
@@ -58,8 +62,21 @@ def main():
             )
             sys.exit(1)
 
+    elif command == "loop":
+        subcommand = args[1] if len(args) > 1 else ""
+
+        if subcommand == "motor_test":
+            from .motor_adapter import run_motor_test
+
+            run_motor_test()
+        else:
+            print(
+                "Usage: python -m digital_drosophila loop <motor_test>"
+            )
+            sys.exit(1)
+
     else:
-        print(f"Unknown command: {command!r}. Choose from: simulate, body")
+        print(f"Unknown command: {command!r}. Choose from: simulate, body, loop")
         sys.exit(1)
 
 
