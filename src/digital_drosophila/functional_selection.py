@@ -432,3 +432,135 @@ def get_or_build_network(
     save_network_snapshot(body_ids, meta_df, motor_leg_map, sources, targets, weights,
                           output_dir=snapshot_dir)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Full VNC network (all 25,635 neurons)
+# ---------------------------------------------------------------------------
+
+_FULL_VNC_SNAPSHOT_DIR = _CACHE_DIR / "full_vnc_network"
+
+
+def get_or_build_full_vnc_network(
+    force_rebuild: bool = False,
+) -> tuple[list[int], pd.DataFrame, dict[int, str], np.ndarray, np.ndarray, np.ndarray]:
+    """Return the complete VNC network (all ~25,635 neurons), cached on disk.
+
+    Same return interface as ``get_or_build_network()``:
+      body_ids, meta_df, motor_leg_map, sources, targets, weights
+
+    Motor neurons are ALL vnc_motor neurons whose exitNerve is a leg nerve
+    (no top-N cap — every leg motor neuron is included).  The sparse
+    connectivity is loaded from the existing joblib cache produced by the
+    full_vnc_benchmark run.
+
+    Parameters
+    ----------
+    force_rebuild : bool
+        Re-query neuPrint even if a cached snapshot exists.
+    """
+    snap_dir = Path(_FULL_VNC_SNAPSHOT_DIR)
+    snap_file = snap_dir / "body_ids.npy"
+
+    if not force_rebuild and snap_file.exists():
+        print("[functional_selection] Loading cached full-VNC network snapshot "
+              f"from {snap_dir.name}...")
+        return _load_full_vnc_snapshot(snap_dir)
+
+    return _build_full_vnc_network(snap_dir)
+
+
+def _build_full_vnc_network(
+    snap_dir: Path,
+) -> tuple[list[int], pd.DataFrame, dict[int, str], np.ndarray, np.ndarray, np.ndarray]:
+    """Query neuPrint for the complete VNC, build motor map, cache to disk."""
+    from .data import connect, load_vnc_neurons, load_connectivity_sparse
+
+    connect()
+    print("[functional_selection] Loading all VNC neurons from neuPrint (cached)...")
+    vnc_df, _ = load_vnc_neurons()
+    body_ids = list(int(x) for x in vnc_df["bodyId"].tolist())
+    n_neurons = len(body_ids)
+    print(f"[functional_selection] {n_neurons:,} VNC neurons loaded.")
+
+    # Build leg motor map (all leg motor neurons, no cap)
+    bid_to_idx = {bid: i for i, bid in enumerate(body_ids)}
+
+    motor_all = vnc_df[vnc_df["superclass"] == "vnc_motor"].copy()
+    leg_motor = motor_all[motor_all["exitNerve"].isin(ALL_LEG_NERVES)].copy()
+    leg_motor = leg_motor.copy()
+    leg_motor["leg"] = leg_motor.apply(
+        lambda row: _assign_leg(row["exitNerve"], row.get("somaSide", "L")),
+        axis=1,
+    )
+    leg_motor = leg_motor.dropna(subset=["leg"])
+
+    motor_leg_map: dict[int, str] = {
+        int(bid): leg
+        for bid, leg in zip(leg_motor["bodyId"].values, leg_motor["leg"].values)
+        if int(bid) in bid_to_idx
+    }
+    print(f"[functional_selection] {len(motor_leg_map):,} leg motor neurons identified.")
+
+    # Enrich metadata with leg column
+    leg_series = leg_motor.set_index("bodyId")["leg"]
+    meta_df = vnc_df.copy()
+    meta_df["leg"] = meta_df["bodyId"].map(leg_series)
+
+    # Load full sparse connectivity (uses joblib cache from benchmark run)
+    print("[functional_selection] Loading full VNC sparse connectivity (cached)...")
+    sources, targets, weights = load_connectivity_sparse(tuple(body_ids))
+    print(f"[functional_selection] {len(sources):,} synapses loaded.")
+
+    # Cache to disk in the functional-selection snapshot format
+    _save_full_vnc_snapshot(
+        body_ids, meta_df, motor_leg_map, sources, targets, weights, snap_dir
+    )
+    return body_ids, meta_df, motor_leg_map, sources, targets, weights
+
+
+def _save_full_vnc_snapshot(
+    body_ids: list[int],
+    meta_df: pd.DataFrame,
+    motor_leg_map: dict[int, str],
+    sources: np.ndarray,
+    targets: np.ndarray,
+    weights: np.ndarray,
+    snap_dir: Path,
+) -> None:
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    np.savez_compressed(
+        snap_dir / "connectivity.npz",
+        sources=sources,
+        targets=targets,
+        weights=weights,
+    )
+    np.save(snap_dir / "body_ids.npy", np.array(body_ids, dtype=np.int64))
+    meta_df.to_csv(snap_dir / "meta.csv", index=False)
+
+    motor_map_df = pd.DataFrame([
+        {"bodyId": bid, "leg": leg}
+        for bid, leg in motor_leg_map.items()
+    ])
+    motor_map_df.to_csv(snap_dir / "motor_leg_map.csv", index=False)
+    print(f"[functional_selection] Full-VNC snapshot saved to {snap_dir}")
+
+
+def _load_full_vnc_snapshot(
+    snap_dir: Path,
+) -> tuple[list[int], pd.DataFrame, dict[int, str], np.ndarray, np.ndarray, np.ndarray]:
+    body_ids = list(np.load(snap_dir / "body_ids.npy").astype(int))
+    meta_df = pd.read_csv(snap_dir / "meta.csv")
+    motor_map_df = pd.read_csv(snap_dir / "motor_leg_map.csv")
+    motor_leg_map = dict(zip(
+        motor_map_df["bodyId"].astype(int).values,
+        motor_map_df["leg"].values,
+    ))
+    conn = np.load(snap_dir / "connectivity.npz")
+    sources = conn["sources"]
+    targets = conn["targets"]
+    weights = conn["weights"]
+    print(f"[functional_selection] Full-VNC snapshot loaded: "
+          f"{len(body_ids):,} neurons, {len(sources):,} synapses.")
+    return body_ids, meta_df, motor_leg_map, sources, targets, weights

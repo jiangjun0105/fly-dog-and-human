@@ -12,7 +12,7 @@ Usage:
     python -m digital_drosophila learn stdp_basic [--episodes N]
     python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0] [--topology biological|random] [--backend cpu|gpu]
     python -m digital_drosophila learn train_gpu [--episodes 50] [--episode-length 2.0]
-    python -m digital_drosophila learn train_functional [--episodes 50] [--hops 2] [--episode-length 2.0] [--force-rebuild] [--backend gpu|cpu] [--reward-mode episodic|continuous] [--learning-rate 0.001]
+    python -m digital_drosophila learn train_functional [--episodes 50] [--hops 2] [--full-vnc] [--episode-length 2.0] [--force-rebuild] [--backend gpu|cpu] [--reward-mode episodic|continuous] [--learning-rate 0.001]
     python -m digital_drosophila learn evaluate --checkpoint PATH [--episodes 3] [--duration 5.0]
     python -m digital_drosophila learn benchmark_full_vnc [--episode-length 2.0] [--coupling-dt 2.0] [--with-homeostasis] [--settling-episodes 10] [--eta-homeo 0.005] [--target-rate 25.0]
     python -m digital_drosophila learn experiment [--episodes 50] [--episode-length 2.0]
@@ -194,11 +194,12 @@ def main():
 
         elif subcommand == "train_functional":
             # Parse --episodes, --hops, --episode-length, --force-rebuild,
-            # --backend, --eta, --reward-mode, --learning-rate
+            # --backend, --eta, --reward-mode, --learning-rate, --full-vnc
             episodes = 50
             episode_length = 2.0
             force_rebuild = False
             n_hops = 2
+            full_vnc = False
             backend = "gpu"
             eta_homeo = 0.01
             reward_mode = "episodic"
@@ -252,6 +253,8 @@ def main():
                         sys.exit(1)
                 elif arg == "--force-rebuild":
                     force_rebuild = True
+                elif arg == "--full-vnc":
+                    full_vnc = True
 
             from .functional_training import run_functional_training
 
@@ -260,6 +263,7 @@ def main():
                 episode_length=episode_length,
                 force_rebuild=force_rebuild,
                 n_hops=n_hops,
+                full_vnc=full_vnc,
                 backend=backend,
                 eta_homeo=eta_homeo,
                 reward_mode=reward_mode,
@@ -349,8 +353,8 @@ def main():
                 "\n  stdp_basic [--episodes N]"
                 "\n  train [--episodes N] [--episode-length S] [--topology bio|random] [--backend cpu|gpu]"
                 "\n  train_gpu [--episodes N] [--episode-length S]"
-                "\n  train_functional [--episodes N] [--hops 1|2|3] [--episode-length S] "
-                "[--backend gpu|cpu] [--force-rebuild] "
+                "\n  train_functional [--episodes N] [--hops 1|2|3] [--full-vnc] "
+                "[--episode-length S] [--backend gpu|cpu] [--force-rebuild] "
                 "[--reward-mode episodic|continuous] [--learning-rate F]"
                 "\n  evaluate --checkpoint PATH [--episodes N] [--duration S]"
                 "\n  benchmark_full_vnc [--episode-length S] [--coupling-dt MS] "

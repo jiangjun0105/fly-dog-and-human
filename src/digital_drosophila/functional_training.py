@@ -89,6 +89,7 @@ class FunctionalTrainingHarness:
         random_seed=42,
         force_rebuild=False,
         n_hops=2,
+        full_vnc=False,
         backend="gpu",
         reward_mode="episodic",
         continuous_update_interval=50,
@@ -110,6 +111,7 @@ class FunctionalTrainingHarness:
         self.random_seed = random_seed
         self.force_rebuild = force_rebuild
         self.n_hops = n_hops
+        self.full_vnc = full_vnc
         if reward_mode not in ("episodic", "continuous"):
             raise ValueError(
                 f"reward_mode must be 'episodic' or 'continuous', got {reward_mode!r}"
@@ -150,17 +152,27 @@ class FunctionalTrainingHarness:
         from .locomotion import build_simulation, settle_simulation
         from .sensory_encoder import SensoryEncoder
         from .motor_adapter import SpikeRateDecoder
-        from .functional_selection import get_or_build_network, build_motor_actuator_map
+        from .functional_selection import (
+            get_or_build_network, get_or_build_full_vnc_network,
+            build_motor_actuator_map,
+        )
 
         # ------------------------------------------------------------------
         # Load functional network
         # ------------------------------------------------------------------
-        print(f"[build] Loading functional locomotor network ({self.n_hops} hop(s))...")
-        (self._body_ids, self._meta_df, self._motor_leg_map,
-         sources_coo, targets_coo, weights_coo) = get_or_build_network(
-            force_rebuild=self.force_rebuild,
-            n_hops=self.n_hops,
-        )
+        if self.full_vnc:
+            print("[build] Loading full VNC network (all neurons)...")
+            (self._body_ids, self._meta_df, self._motor_leg_map,
+             sources_coo, targets_coo, weights_coo) = get_or_build_full_vnc_network(
+                force_rebuild=self.force_rebuild,
+            )
+        else:
+            print(f"[build] Loading functional locomotor network ({self.n_hops} hop(s))...")
+            (self._body_ids, self._meta_df, self._motor_leg_map,
+             sources_coo, targets_coo, weights_coo) = get_or_build_network(
+                force_rebuild=self.force_rebuild,
+                n_hops=self.n_hops,
+            )
 
         self._n_neurons = len(self._body_ids)
         bid_to_idx = {int(bid): i for i, bid in enumerate(self._body_ids)}
@@ -204,8 +216,22 @@ class FunctionalTrainingHarness:
         # ------------------------------------------------------------------
         # Build sign vector from neurotransmitter types
         # ------------------------------------------------------------------
-        nt_series = self._meta_df["consensusNt"].fillna("unknown")
-        confidence = self._meta_df["predictedNtConfidence"].fillna(0.5).values
+        nt_col = None
+        for col in ["consensusNt", "predictedNt", "celltypePredictedNt"]:
+            if col in self._meta_df.columns and self._meta_df[col].notna().any():
+                nt_col = col
+                break
+        if nt_col:
+            nt_series = self._meta_df[nt_col].fillna("unknown")
+        else:
+            nt_series = ["unknown"] * self._n_neurons
+
+        conf_col = "predictedNtConfidence"
+        if conf_col in self._meta_df.columns:
+            confidence = self._meta_df[conf_col].fillna(0.5).values.astype(float)
+        else:
+            confidence = np.full(self._n_neurons, 0.5, dtype=float)
+
         self._sign_vector = np.array(
             [NT_SIGN_MAP.get(nt, 0) or 0 for nt in nt_series]
         )
@@ -388,18 +414,28 @@ class FunctionalTrainingHarness:
         from .locomotion import build_simulation, settle_simulation
         from .sensory_encoder import SensoryEncoder
         from .motor_adapter import SpikeRateDecoder
-        from .functional_selection import get_or_build_network, build_motor_actuator_map
+        from .functional_selection import (
+            get_or_build_network, get_or_build_full_vnc_network,
+            build_motor_actuator_map,
+        )
         from .gpu_backend import PyGeNNBackend
 
         # ------------------------------------------------------------------
         # Load functional network
         # ------------------------------------------------------------------
-        print(f"[build_gpu] Loading functional locomotor network ({self.n_hops} hop(s))...")
-        (self._body_ids, self._meta_df, self._motor_leg_map,
-         sources_coo, targets_coo, weights_coo) = get_or_build_network(
-            force_rebuild=self.force_rebuild,
-            n_hops=self.n_hops,
-        )
+        if self.full_vnc:
+            print("[build_gpu] Loading full VNC network (all ~25,635 neurons)...")
+            (self._body_ids, self._meta_df, self._motor_leg_map,
+             sources_coo, targets_coo, weights_coo) = get_or_build_full_vnc_network(
+                force_rebuild=self.force_rebuild,
+            )
+        else:
+            print(f"[build_gpu] Loading functional locomotor network ({self.n_hops} hop(s))...")
+            (self._body_ids, self._meta_df, self._motor_leg_map,
+             sources_coo, targets_coo, weights_coo) = get_or_build_network(
+                force_rebuild=self.force_rebuild,
+                n_hops=self.n_hops,
+            )
 
         self._n_neurons = len(self._body_ids)
         bid_to_idx = {int(bid): i for i, bid in enumerate(self._body_ids)}
@@ -439,8 +475,22 @@ class FunctionalTrainingHarness:
         # ------------------------------------------------------------------
         # Build sign vector from neurotransmitter types
         # ------------------------------------------------------------------
-        nt_series = self._meta_df["consensusNt"].fillna("unknown")
-        confidence = self._meta_df["predictedNtConfidence"].fillna(0.5).values
+        nt_col = None
+        for col in ["consensusNt", "predictedNt", "celltypePredictedNt"]:
+            if col in self._meta_df.columns and self._meta_df[col].notna().any():
+                nt_col = col
+                break
+        if nt_col:
+            nt_series = self._meta_df[nt_col].fillna("unknown")
+        else:
+            nt_series = ["unknown"] * self._n_neurons
+
+        conf_col = "predictedNtConfidence"
+        if conf_col in self._meta_df.columns:
+            confidence = self._meta_df[conf_col].fillna(0.5).values.astype(np.float32)
+        else:
+            confidence = np.full(self._n_neurons, 0.5, dtype=np.float32)
+
         self._sign_vector = np.array(
             [NT_SIGN_MAP.get(nt, 0) or 0 for nt in nt_series]
         )
@@ -987,7 +1037,10 @@ class FunctionalTrainingHarness:
         print("Functional Training Harness: Biological Locomotor Circuit")
         print(f"  Backend: {self._backend_type.upper()}")
         print(f"  Reward mode: {self.reward_mode.upper()}")
-        print(f"  Hops: {self.n_hops}")
+        if self.full_vnc:
+            print(f"  Mode: FULL VNC (all ~25,635 neurons)")
+        else:
+            print(f"  Hops: {self.n_hops}")
         print(f"  Neurons: {self._n_neurons} "
               f"({len(self._motor_neuron_indices)} motor + "
               f"{len(self._ascending_indices)} ascending + premotor)")
@@ -1130,7 +1183,8 @@ class FunctionalTrainingHarness:
                 "lambda_decay": self.lambda_decay,
                 "reward_mode": self.reward_mode,
                 "continuous_update_interval": self.continuous_update_interval,
-                "mode": "functional_biological",
+                "full_vnc": self.full_vnc,
+                "mode": "full_vnc" if self.full_vnc else "functional_biological",
             },
             "episodes": [],
         }
@@ -1472,6 +1526,7 @@ def run_functional_training(
     episode_length=2.0,
     force_rebuild=False,
     n_hops=2,
+    full_vnc=False,
     backend="gpu",
     eta_homeo=0.01,
     reward_mode="episodic",
@@ -1487,6 +1542,10 @@ def run_functional_training(
         Re-query neuPrint even if cached.
     n_hops : int
         Number of upstream hops for neuron selection (default 2).
+        Ignored when full_vnc=True.
+    full_vnc : bool
+        If True, use the complete VNC (~25,635 neurons) instead of a
+        hop-selected subset.
     backend : str
         Neural simulator backend: "gpu" (default) or "cpu".
     eta_homeo : float
@@ -1496,9 +1555,10 @@ def run_functional_training(
     learning_rate : float
         STDP weight update learning rate (default 0.001).
     """
+    mode_str = "full_vnc" if full_vnc else f"{n_hops}hop"
     print(f"\nStarting functional training "
           f"({episodes} episodes, {episode_length}s each, "
-          f"{n_hops} hop(s), {backend.upper()} backend, "
+          f"{mode_str}, {backend.upper()} backend, "
           f"reward_mode={reward_mode}, "
           f"eta_homeo={eta_homeo}, lr={learning_rate})...\n")
 
@@ -1514,16 +1574,20 @@ def run_functional_training(
         baseline_window=5,
         eta_homeo=eta_homeo,
         target_rate=25.0,
-        lambda_decay=0.001,
+        lambda_decay=0.0001,
         eligibility_decay_threshold=0.01,
         checkpoint_interval=10,
         force_rebuild=force_rebuild,
         n_hops=n_hops,
+        full_vnc=full_vnc,
         backend=backend,
         reward_mode=reward_mode,
     )
 
-    suffix = f"_functional_{n_hops}hop"
+    if full_vnc:
+        suffix = "_full_vnc"
+    else:
+        suffix = f"_functional_{n_hops}hop"
     if harness._backend_type == "gpu":
         suffix += "_gpu"
     if reward_mode == "continuous":
