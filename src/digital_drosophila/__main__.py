@@ -192,12 +192,13 @@ def main():
             run_evaluation(checkpoint, episodes=episodes, duration=duration)
 
         elif subcommand == "train_functional":
-            # Parse --episodes, --hops, --episode-length, --force-rebuild, --backend
+            # Parse --episodes, --hops, --episode-length, --force-rebuild, --backend, --eta
             episodes = 50
             episode_length = 2.0
             force_rebuild = False
             n_hops = 2
             backend = "gpu"
+            eta_homeo = 0.01
             for i, arg in enumerate(args[2:], start=2):
                 if arg == "--episodes" and i + 1 < len(args):
                     try:
@@ -227,6 +228,12 @@ def main():
                         print(f"Invalid backend: {backend!r}. "
                               "Choose 'cpu' or 'gpu'.")
                         sys.exit(1)
+                elif arg == "--eta" and i + 1 < len(args):
+                    try:
+                        eta_homeo = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid eta value: {args[i + 1]!r}")
+                        sys.exit(1)
                 elif arg == "--force-rebuild":
                     force_rebuild = True
 
@@ -238,6 +245,7 @@ def main():
                 force_rebuild=force_rebuild,
                 n_hops=n_hops,
                 backend=backend,
+                eta_homeo=eta_homeo,
             )
 
         elif subcommand == "experiment":

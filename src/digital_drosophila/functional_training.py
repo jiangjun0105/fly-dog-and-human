@@ -1297,6 +1297,7 @@ def run_functional_training(
     force_rebuild=False,
     n_hops=2,
     backend="gpu",
+    eta_homeo=0.01,
 ):
     """Run functional training (biological locomotor circuit + STDP).
 
@@ -1310,10 +1311,13 @@ def run_functional_training(
         Number of upstream hops for neuron selection (default 2).
     backend : str
         Neural simulator backend: "gpu" (default) or "cpu".
+    eta_homeo : float
+        Homeostatic plasticity learning rate (default 0.01).
     """
     print(f"\nStarting functional training "
           f"({episodes} episodes, {episode_length}s each, "
-          f"{n_hops} hop(s), {backend.upper()} backend)...\n")
+          f"{n_hops} hop(s), {backend.upper()} backend, "
+          f"eta_homeo={eta_homeo})...\n")
 
     harness = FunctionalTrainingHarness(
         n_episodes=episodes,
@@ -1325,7 +1329,7 @@ def run_functional_training(
         motor_gain=0.3,
         sensory_gain=500e-12,
         baseline_window=5,
-        eta_homeo=0.01,
+        eta_homeo=eta_homeo,
         target_rate=25.0,
         lambda_decay=0.001,
         eligibility_decay_threshold=0.01,
