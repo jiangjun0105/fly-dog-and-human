@@ -14,7 +14,7 @@ Usage:
     python -m digital_drosophila learn train_gpu [--episodes 50] [--episode-length 2.0]
     python -m digital_drosophila learn train_functional [--episodes 50] [--hops 2] [--episode-length 2.0] [--force-rebuild] [--backend gpu|cpu] [--reward-mode episodic|continuous] [--learning-rate 0.001]
     python -m digital_drosophila learn evaluate --checkpoint PATH [--episodes 3] [--duration 5.0]
-    python -m digital_drosophila learn benchmark_full_vnc [--episode-length 2.0] [--coupling-dt 2.0]
+    python -m digital_drosophila learn benchmark_full_vnc [--episode-length 2.0] [--coupling-dt 2.0] [--with-homeostasis] [--settling-episodes 10] [--eta-homeo 0.005] [--target-rate 25.0]
     python -m digital_drosophila learn experiment [--episodes 50] [--episode-length 2.0]
     python -m digital_drosophila demo video [--duration 3.0] [--fps 30]
     python -m digital_drosophila demo tripod [--duration 3.0] [--fps 30]
@@ -267,9 +267,14 @@ def main():
             )
 
         elif subcommand == "benchmark_full_vnc":
-            # Parse --episode-length and --coupling-dt
+            # Parse --episode-length, --coupling-dt, --with-homeostasis,
+            # --settling-episodes, --eta-homeo, --target-rate
             episode_length = 2.0
             coupling_dt = 2.0
+            with_homeostasis = False
+            settling_episodes = 10
+            eta_homeo = 0.005
+            target_rate = 25.0
             for i, arg in enumerate(args[2:], start=2):
                 if arg == "--episode-length" and i + 1 < len(args):
                     try:
@@ -283,10 +288,37 @@ def main():
                     except ValueError:
                         print(f"Invalid coupling-dt value: {args[i + 1]!r}")
                         sys.exit(1)
+                elif arg == "--with-homeostasis":
+                    with_homeostasis = True
+                elif arg == "--settling-episodes" and i + 1 < len(args):
+                    try:
+                        settling_episodes = int(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid settling-episodes value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--eta-homeo" and i + 1 < len(args):
+                    try:
+                        eta_homeo = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid eta-homeo value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--target-rate" and i + 1 < len(args):
+                    try:
+                        target_rate = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid target-rate value: {args[i + 1]!r}")
+                        sys.exit(1)
 
             from .full_vnc_benchmark import run_benchmark
 
-            run_benchmark(episode_length_s=episode_length, coupling_dt_ms=coupling_dt)
+            run_benchmark(
+                episode_length_s=episode_length,
+                coupling_dt_ms=coupling_dt,
+                with_homeostasis=with_homeostasis,
+                n_settling_episodes=settling_episodes,
+                eta_homeo=eta_homeo,
+                target_rate_hz=target_rate,
+            )
 
         elif subcommand == "experiment":
             # Parse --episodes and --episode-length
@@ -321,7 +353,8 @@ def main():
                 "[--backend gpu|cpu] [--force-rebuild] "
                 "[--reward-mode episodic|continuous] [--learning-rate F]"
                 "\n  evaluate --checkpoint PATH [--episodes N] [--duration S]"
-                "\n  benchmark_full_vnc [--episode-length S] [--coupling-dt MS]"
+                "\n  benchmark_full_vnc [--episode-length S] [--coupling-dt MS] "
+                "[--with-homeostasis] [--settling-episodes N] [--eta-homeo F] [--target-rate F]"
                 "\n  experiment [--episodes N] [--episode-length S]"
             )
             sys.exit(1)

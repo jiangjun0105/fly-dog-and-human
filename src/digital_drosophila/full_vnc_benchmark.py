@@ -4,11 +4,17 @@ Loads ALL VNC neurons (~25,635) and their connectivity (~31M synapses),
 builds a PyGeNN GPU network, hooks it to FlyGym, and runs exactly 1 episode
 (2 seconds simulated). Reports timing breakdown and network stats.
 
+With --with-homeostasis: runs N settling episodes (homeostatic threshold
+updates only, no STDP/reward) until firing rates converge to ~25 Hz, then
+runs 1 measured episode.
+
 Usage
 -----
     python -m digital_drosophila learn benchmark_full_vnc
+    python -m digital_drosophila learn benchmark_full_vnc --with-homeostasis
 or:
     python -c "from src.digital_drosophila.full_vnc_benchmark import run_benchmark; run_benchmark()"
+    python -c "from src.digital_drosophila.full_vnc_benchmark import run_benchmark; run_benchmark(with_homeostasis=True)"
 """
 
 import os
@@ -70,7 +76,14 @@ def _gpu_memory_mb() -> str:
     return "unavailable"
 
 
-def run_benchmark(episode_length_s: float = 2.0, coupling_dt_ms: float = 2.0):
+def run_benchmark(
+    episode_length_s: float = 2.0,
+    coupling_dt_ms: float = 2.0,
+    with_homeostasis: bool = False,
+    n_settling_episodes: int = 10,
+    eta_homeo: float = 0.005,
+    target_rate_hz: float = 25.0,
+):
     """Run the full VNC benchmark.
 
     Parameters
@@ -79,13 +92,27 @@ def run_benchmark(episode_length_s: float = 2.0, coupling_dt_ms: float = 2.0):
         Length of the simulated episode in seconds.
     coupling_dt_ms : float
         Neural-body coupling timestep in milliseconds.
+    with_homeostasis : bool
+        If True, run ``n_settling_episodes`` warm-up episodes with homeostatic
+        threshold updates before the measured episode.
+    n_settling_episodes : int
+        Number of settling episodes when ``with_homeostasis=True``.
+    eta_homeo : float
+        Homeostatic learning rate (mV per Hz of rate error per episode).
+    target_rate_hz : float
+        Target mean firing rate in Hz.
     """
     os.environ.setdefault("MUJOCO_GL", "egl")
 
     print("=" * 70)
     print("Full VNC Network Benchmark")
-    print(f"  Episode length: {episode_length_s}s")
-    print(f"  Coupling dt:    {coupling_dt_ms} ms")
+    print(f"  Episode length:   {episode_length_s}s")
+    print(f"  Coupling dt:      {coupling_dt_ms} ms")
+    if with_homeostasis:
+        print(f"  Homeostasis:      ON  (eta={eta_homeo}, target={target_rate_hz} Hz, "
+              f"{n_settling_episodes} settling episodes)")
+    else:
+        print(f"  Homeostasis:      OFF")
     print("=" * 70)
 
     t_total_start = time.time()
@@ -284,10 +311,10 @@ def run_benchmark(episode_length_s: float = 2.0, coupling_dt_ms: float = 2.0):
     print(f"  FlyGym body built in {t_body:.1f}s")
 
     # ------------------------------------------------------------------
-    # Episode reset (burn-in)
+    # Shared setup: background currents and initial state
     # ------------------------------------------------------------------
-    print("\n[Episode] Resetting network (500ms burn-in)...")
-    t0 = time.time()
+    import mujoco
+    from flygym.compose import ActuatorType
 
     # Background current: 180 pA for all, +30 pA for descending
     bg_current_pA = 180.0
@@ -296,79 +323,128 @@ def run_benchmark(episode_length_s: float = 2.0, coupling_dt_ms: float = 2.0):
     if descending_indices:
         gpu_bg_currents[descending_indices] += descending_extra_pA
 
-    gpu_backend.reset(weights_raw, thresholds_mV)
-
-    burn_in_steps = int(500.0 / coupling_dt_ms)
-    for _ in range(burn_in_steps):
-        gpu_backend.step(gpu_bg_currents)
-
-    gpu_backend._spike_counts[:] = 0
-
-    # Reset body
+    # Snapshot initial body state for resets
     initial_qpos = data.qpos.copy()
     initial_qvel = data.qvel.copy()
-    data.qpos[:] = initial_qpos
-    data.qvel[:] = initial_qvel
-    data.ctrl[:] = neutral_ctrl
-    import mujoco
-    mujoco.mj_forward(model, data)
 
-    episode_start_pos = data.qpos[0:3].copy()
+    motor_gain = 0.3
+    baseline_hz = 15.0
+    n_steps = int(episode_length_s * 1000 / coupling_dt_ms)
 
-    joint_angles = sim.get_joint_angles("nmf")
-    body_vel = data.qvel[0:3].copy()
-    sensory_currents = encoder.encode(joint_angles, body_vel)
+    # Working copy of thresholds — updated by homeostasis across episodes
+    current_thresholds_mV = thresholds_mV.copy()
+
+    def _reset_episode():
+        """Reset GPU network and body for a new episode."""
+        from .motor_adapter import SpikeRateDecoder as _SRD
+        gpu_backend.reset(weights_raw, current_thresholds_mV)
+        burn_in_steps = int(500.0 / coupling_dt_ms)
+        for _ in range(burn_in_steps):
+            gpu_backend.step(gpu_bg_currents)
+        gpu_backend._spike_counts[:] = 0
+
+        data.qpos[:] = initial_qpos
+        data.qvel[:] = initial_qvel
+        data.ctrl[:] = neutral_ctrl
+        mujoco.mj_forward(model, data)
+
+        dec = _SRD(motor_neuron_indices, window_ms=50.0, dt_ms=coupling_dt_ms)
+        ep_start = data.qpos[0:3].copy()
+        ja = sim.get_joint_angles("nmf")
+        bv = data.qvel[0:3].copy()
+        sc = encoder.encode(ja, bv)
+        return dec, ep_start, sc
+
+    def _run_one_episode(decoder_ep, sensory_currents_ep):
+        """Run one episode step loop; return final sensory currents."""
+        for _step in range(n_steps):
+            sensory_pA = sensory_currents_ep * 1e12
+            combined = sensory_pA + gpu_bg_currents
+            motor_spikes = gpu_backend.step(combined)
+
+            decoder_ep.update(motor_spikes)
+            ep_rates = decoder_ep.get_rates_hz()
+
+            action = neutral_ctrl.copy()
+            actuator_offsets: dict[int, float] = {}
+            actuator_counts: dict[int, int] = {}
+            for net_idx, actuator_list in motor_actuator_map.items():
+                rate = ep_rates.get(net_idx, 0.0)
+                offset = float(np.clip(
+                    (rate - baseline_hz) / max(baseline_hz, 1.0) * motor_gain,
+                    -motor_gain, motor_gain,
+                ))
+                for act_idx in actuator_list:
+                    actuator_offsets[act_idx] = actuator_offsets.get(act_idx, 0.0) + offset
+                    actuator_counts[act_idx] = actuator_counts.get(act_idx, 0) + 1
+            for act_idx, total_offset in actuator_offsets.items():
+                action[act_idx] += total_offset / actuator_counts[act_idx]
+
+            for _ in range(flygym_steps_per_coupling):
+                sim.set_actuator_inputs("nmf", ActuatorType.POSITION, action)
+                sim.step()
+
+            ja = sim.get_joint_angles("nmf")
+            bv = data.qvel[0:3].copy()
+            sensory_currents_ep = encoder.encode(ja, bv)
+        return sensory_currents_ep
+
+    # ------------------------------------------------------------------
+    # Homeostatic settling phase (optional)
+    # ------------------------------------------------------------------
+    t_settling = 0.0
+    settling_rates_history = []
+
+    if with_homeostasis:
+        print(f"\n[Homeostasis] Running {n_settling_episodes} settling episodes "
+              f"(eta={eta_homeo}, target={target_rate_hz} Hz)...")
+        t_settle_start = time.time()
+
+        for ep_i in range(n_settling_episodes):
+            dec_ep, ep_start_pos_s, sc_ep = _reset_episode()
+            _run_one_episode(dec_ep, sc_ep)
+
+            # Compute mean firing rate for this episode
+            spike_counts_ep = gpu_backend.get_spike_counts()
+            rates_ep = spike_counts_ep.astype(float) / episode_length_s
+            mean_rate_ep = float(np.mean(rates_ep))
+            settling_rates_history.append(mean_rate_ep)
+
+            # Homeostatic threshold update (clipped to [−70, −30] mV)
+            rate_deviation = rates_ep - target_rate_hz
+            current_thresholds_mV = np.clip(
+                current_thresholds_mV + eta_homeo * rate_deviation,
+                -70.0, -30.0,
+            )
+
+            th_mean = float(np.mean(current_thresholds_mV))
+            th_std = float(np.std(current_thresholds_mV))
+            print(f"  Settling ep {ep_i + 1}/{n_settling_episodes}: "
+                  f"mean rate={mean_rate_ep:.1f} Hz  "
+                  f"threshold mean={th_mean:.2f} mV  std={th_std:.3f} mV")
+
+        t_settling = time.time() - t_settle_start
+        print(f"  Settling complete in {t_settling:.1f}s  "
+              f"(final mean rate={settling_rates_history[-1]:.1f} Hz)")
+
+    # ------------------------------------------------------------------
+    # Episode reset (burn-in) for the measured episode
+    # ------------------------------------------------------------------
+    print("\n[Episode] Resetting network (500ms burn-in)...")
+    t0 = time.time()
+
+    decoder, episode_start_pos, sensory_currents = _reset_episode()
 
     t_reset = time.time() - t0
     print(f"  Burn-in complete in {t_reset:.1f}s")
 
     # ------------------------------------------------------------------
-    # Run 1 episode
+    # Run 1 measured episode
     # ------------------------------------------------------------------
     print(f"\n[Episode] Running 1 episode ({episode_length_s}s simulated)...")
-    from flygym.compose import ActuatorType
-
-    n_steps = int(episode_length_s * 1000 / coupling_dt_ms)
-    motor_gain = 0.3
-    baseline_hz = 15.0
 
     t_episode_start = time.time()
-
-    for _step in range(n_steps):
-        # Step GPU neural simulation
-        sensory_pA = sensory_currents * 1e12
-        combined_currents = sensory_pA + gpu_bg_currents
-        motor_spikes = gpu_backend.step(combined_currents)
-
-        # Decode motor spikes
-        decoder.update(motor_spikes)
-        rates = decoder.get_rates_hz()
-
-        # Build action from motor rates
-        action = neutral_ctrl.copy()
-        actuator_offsets: dict[int, float] = {}
-        actuator_counts: dict[int, int] = {}
-        for net_idx, actuator_list in motor_actuator_map.items():
-            rate = rates.get(net_idx, 0.0)
-            offset = float(np.clip(
-                (rate - baseline_hz) / max(baseline_hz, 1.0) * motor_gain,
-                -motor_gain, motor_gain,
-            ))
-            for act_idx in actuator_list:
-                actuator_offsets[act_idx] = actuator_offsets.get(act_idx, 0.0) + offset
-                actuator_counts[act_idx] = actuator_counts.get(act_idx, 0) + 1
-        for act_idx, total_offset in actuator_offsets.items():
-            action[act_idx] += total_offset / actuator_counts[act_idx]
-
-        for _ in range(flygym_steps_per_coupling):
-            sim.set_actuator_inputs("nmf", ActuatorType.POSITION, action)
-            sim.step()
-
-        # Read sensors
-        joint_angles = sim.get_joint_angles("nmf")
-        body_vel = data.qvel[0:3].copy()
-        sensory_currents = encoder.encode(joint_angles, body_vel)
-
+    _run_one_episode(decoder, sensory_currents)
     t_episode = time.time() - t_episode_start
 
     # ------------------------------------------------------------------
@@ -391,6 +467,8 @@ def run_benchmark(episode_length_s: float = 2.0, coupling_dt_ms: float = 2.0):
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
     print("FULL VNC BENCHMARK RESULTS")
+    if with_homeostasis:
+        print("  (with homeostatic plasticity settling)")
     print("=" * 70)
     print(f"\n  Network:")
     print(f"    Total neurons:        {n_neurons:,}")
@@ -403,10 +481,12 @@ def run_benchmark(episode_length_s: float = 2.0, coupling_dt_ms: float = 2.0):
     print(f"    Connectivity load:    {t_connectivity:.1f}s")
     print(f"    GPU build (CUDA):     {t_build:.1f}s")
     print(f"    FlyGym body build:    {t_body:.1f}s")
+    if with_homeostasis:
+        print(f"    Settling ({n_settling_episodes} eps):   {t_settling:.1f}s")
     print(f"    Burn-in (500ms):      {t_reset:.1f}s")
     print(f"    Episode wall time:    {t_episode:.1f}s  *** KEY NUMBER ***")
     print(f"    Total wall time:      {t_total:.1f}s")
-    print(f"\n  Episode stats:")
+    print(f"\n  Episode stats (measured episode):")
     print(f"    Simulated time:       {episode_length_s}s")
     print(f"    Real-time factor:     {episode_length_s / t_episode:.3f}x "
           f"({'faster' if episode_length_s / t_episode > 1 else 'slower'} than real-time)")
@@ -415,6 +495,19 @@ def run_benchmark(episode_length_s: float = 2.0, coupling_dt_ms: float = 2.0):
           f"({100*active_neurons/n_neurons:.1f}%)")
     print(f"    Mean firing rate:     {mean_rate:.2f} Hz")
     print(f"    Forward displacement: {forward_displacement_mm:.4f} mm")
+    if with_homeostasis and settling_rates_history:
+        print(f"\n  Homeostasis settling:")
+        print(f"    Initial rate:         {settling_rates_history[0]:.1f} Hz")
+        print(f"    Final rate:           {settling_rates_history[-1]:.1f} Hz")
+        print(f"    Target rate:          {target_rate_hz:.1f} Hz")
+        final_th_mean = float(np.mean(current_thresholds_mV))
+        final_th_std = float(np.std(current_thresholds_mV))
+        print(f"    Final threshold:      mean={final_th_mean:.2f} mV  "
+              f"std={final_th_std:.3f} mV")
+        print(f"    Rate convergence:     "
+              f"{'YES' if abs(settling_rates_history[-1] - target_rate_hz) < 5 else 'NO'} "
+              f"(|{settling_rates_history[-1]:.1f} - {target_rate_hz:.1f}| = "
+              f"{abs(settling_rates_history[-1] - target_rate_hz):.1f} Hz)")
     print(f"\n  GPU memory after build: {gpu_mem_after}")
     print(f"\n  Projections:")
     print(f"    50 episodes:          {50 * t_episode:.0f}s "
@@ -434,10 +527,13 @@ def run_benchmark(episode_length_s: float = 2.0, coupling_dt_ms: float = 2.0):
         "n_neurons": n_neurons,
         "n_synapses": n_synapses,
         "t_build_s": t_build,
+        "t_settling_s": t_settling,
         "t_episode_s": t_episode,
         "t_total_s": t_total,
         "mean_rate_hz": mean_rate,
         "active_neurons": active_neurons,
         "forward_displacement_mm": forward_displacement_mm,
         "gpu_memory": gpu_mem_after,
+        "settling_rates_history": settling_rates_history,
+        "final_thresholds_mV": current_thresholds_mV if with_homeostasis else None,
     }
