@@ -12,8 +12,9 @@ Usage:
     python -m digital_drosophila learn stdp_basic [--episodes N]
     python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0] [--topology biological|random] [--backend cpu|gpu]
     python -m digital_drosophila learn train_gpu [--episodes 50] [--episode-length 2.0]
-    python -m digital_drosophila learn train_functional [--episodes 50] [--hops 2] [--episode-length 2.0] [--force-rebuild] [--backend gpu|cpu]
+    python -m digital_drosophila learn train_functional [--episodes 50] [--hops 2] [--episode-length 2.0] [--force-rebuild] [--backend gpu|cpu] [--reward-mode episodic|continuous] [--learning-rate 0.001]
     python -m digital_drosophila learn evaluate --checkpoint PATH [--episodes 3] [--duration 5.0]
+    python -m digital_drosophila learn benchmark_full_vnc [--episode-length 2.0] [--coupling-dt 2.0]
     python -m digital_drosophila learn experiment [--episodes 50] [--episode-length 2.0]
     python -m digital_drosophila demo video [--duration 3.0] [--fps 30]
     python -m digital_drosophila demo tripod [--duration 3.0] [--fps 30]
@@ -192,13 +193,16 @@ def main():
             run_evaluation(checkpoint, episodes=episodes, duration=duration)
 
         elif subcommand == "train_functional":
-            # Parse --episodes, --hops, --episode-length, --force-rebuild, --backend, --eta
+            # Parse --episodes, --hops, --episode-length, --force-rebuild,
+            # --backend, --eta, --reward-mode, --learning-rate
             episodes = 50
             episode_length = 2.0
             force_rebuild = False
             n_hops = 2
             backend = "gpu"
             eta_homeo = 0.01
+            reward_mode = "episodic"
+            learning_rate = 0.001
             for i, arg in enumerate(args[2:], start=2):
                 if arg == "--episodes" and i + 1 < len(args):
                     try:
@@ -234,6 +238,18 @@ def main():
                     except ValueError:
                         print(f"Invalid eta value: {args[i + 1]!r}")
                         sys.exit(1)
+                elif arg == "--reward-mode" and i + 1 < len(args):
+                    reward_mode = args[i + 1]
+                    if reward_mode not in ("episodic", "continuous"):
+                        print(f"Invalid reward-mode: {reward_mode!r}. "
+                              "Choose 'episodic' or 'continuous'.")
+                        sys.exit(1)
+                elif arg == "--learning-rate" and i + 1 < len(args):
+                    try:
+                        learning_rate = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid learning-rate value: {args[i + 1]!r}")
+                        sys.exit(1)
                 elif arg == "--force-rebuild":
                     force_rebuild = True
 
@@ -246,7 +262,31 @@ def main():
                 n_hops=n_hops,
                 backend=backend,
                 eta_homeo=eta_homeo,
+                reward_mode=reward_mode,
+                learning_rate=learning_rate,
             )
+
+        elif subcommand == "benchmark_full_vnc":
+            # Parse --episode-length and --coupling-dt
+            episode_length = 2.0
+            coupling_dt = 2.0
+            for i, arg in enumerate(args[2:], start=2):
+                if arg == "--episode-length" and i + 1 < len(args):
+                    try:
+                        episode_length = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid episode-length value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--coupling-dt" and i + 1 < len(args):
+                    try:
+                        coupling_dt = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid coupling-dt value: {args[i + 1]!r}")
+                        sys.exit(1)
+
+            from .full_vnc_benchmark import run_benchmark
+
+            run_benchmark(episode_length_s=episode_length, coupling_dt_ms=coupling_dt)
 
         elif subcommand == "experiment":
             # Parse --episodes and --episode-length
@@ -273,13 +313,15 @@ def main():
         else:
             print(
                 "Usage: python -m digital_drosophila learn "
-                "<stdp_basic|train|train_gpu|train_functional|evaluate|experiment> [options]\n"
+                "<stdp_basic|train|train_gpu|train_functional|evaluate|benchmark_full_vnc|experiment> [options]\n"
                 "\n  stdp_basic [--episodes N]"
                 "\n  train [--episodes N] [--episode-length S] [--topology bio|random] [--backend cpu|gpu]"
                 "\n  train_gpu [--episodes N] [--episode-length S]"
                 "\n  train_functional [--episodes N] [--hops 1|2|3] [--episode-length S] "
-                "[--backend gpu|cpu] [--force-rebuild]"
+                "[--backend gpu|cpu] [--force-rebuild] "
+                "[--reward-mode episodic|continuous] [--learning-rate F]"
                 "\n  evaluate --checkpoint PATH [--episodes N] [--duration S]"
+                "\n  benchmark_full_vnc [--episode-length S] [--coupling-dt MS]"
                 "\n  experiment [--episodes N] [--episode-length S]"
             )
             sys.exit(1)

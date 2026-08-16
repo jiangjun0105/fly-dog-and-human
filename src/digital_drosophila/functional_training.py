@@ -60,6 +60,14 @@ class FunctionalTrainingHarness:
     backend : str
         Neural simulator backend: "gpu" (PyGeNN, default) or "cpu" (Brian2).
         Falls back to "cpu" automatically if GPU is unavailable.
+    reward_mode : str
+        Reward delivery mode: "episodic" (default, single reward at episode
+        end) or "continuous" (reward at every coupling step based on
+        instantaneous forward velocity, weight updates batched every
+        ``continuous_update_interval`` steps).
+    continuous_update_interval : int
+        For continuous reward mode: how many coupling steps between weight
+        updates (default 50, i.e. every 100 ms at 2 ms/step).
     """
 
     def __init__(
@@ -82,6 +90,8 @@ class FunctionalTrainingHarness:
         force_rebuild=False,
         n_hops=2,
         backend="gpu",
+        reward_mode="episodic",
+        continuous_update_interval=50,
     ):
         self.n_episodes = n_episodes
         self.episode_length_s = episode_length_s
@@ -100,6 +110,12 @@ class FunctionalTrainingHarness:
         self.random_seed = random_seed
         self.force_rebuild = force_rebuild
         self.n_hops = n_hops
+        if reward_mode not in ("episodic", "continuous"):
+            raise ValueError(
+                f"reward_mode must be 'episodic' or 'continuous', got {reward_mode!r}"
+            )
+        self.reward_mode = reward_mode
+        self.continuous_update_interval = continuous_update_interval
 
         # Resolve backend — fall back to cpu if GPU unavailable
         if backend == "gpu":
@@ -654,6 +670,8 @@ class FunctionalTrainingHarness:
     def _run_episode(self):
         """Run one closed-loop episode."""
         if self._backend_type == "gpu":
+            if self.reward_mode == "continuous":
+                return self._run_episode_gpu_continuous()
             return self._run_episode_gpu()
 
         import brian2
@@ -727,6 +745,127 @@ class FunctionalTrainingHarness:
             joint_angles = self._sim.get_joint_angles("nmf")
             body_vel = self._data.qvel[0:3].copy()
             self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
+    def _run_episode_gpu_continuous(self):
+        """Run one closed-loop episode with continuous per-step reward and weight updates.
+
+        Instead of accumulating eligibility traces for a single end-of-episode
+        weight update, this method updates weights every
+        ``continuous_update_interval`` coupling steps using the instantaneous
+        forward displacement as a reward signal.  The effective per-step
+        learning rate is scaled down by ``continuous_update_interval`` so that
+        the total weight change per episode remains comparable to episodic mode.
+
+        Side-effects
+        ------------
+        - ``self._current_weights`` is modified in-place throughout the episode.
+        - ``self._reward_baseline`` is maintained as an exponential moving
+          average across steps (initialised on first use).
+        - ``self._episode_total_displacement`` records the total forward
+          displacement for logging.
+        """
+        from flygym.compose import ActuatorType
+
+        n_steps = int(self.episode_length_s * 1000 / self.coupling_dt_ms)
+
+        # Initialise running reward baseline (EMA) on first episode
+        if not hasattr(self, "_reward_baseline"):
+            self._reward_baseline = 0.0
+
+        # Effective lr per update batch: divide by interval so total update
+        # magnitude stays comparable to a single episodic update.
+        # Also divide by 10 extra for safety (many more total updates than
+        # episodic: n_steps / interval updates per episode).
+        n_batches_per_episode = max(1, n_steps // self.continuous_update_interval)
+        effective_lr = self.learning_rate / n_batches_per_episode
+
+        # Track position for per-step reward
+        prev_x = float(self._data.qpos[0])
+        accumulated_dw = np.zeros_like(self._current_weights)
+        steps_since_update = 0
+        total_displacement = 0.0
+
+        for _step in range(n_steps):
+            # 1. Step GPU neural simulation
+            sensory_pA = self._sensory_currents * 1e12
+            combined_currents = sensory_pA + self._gpu_bg_currents
+            motor_spikes = self._gpu_backend.step(combined_currents)
+
+            # 2. Decode motor spikes
+            self._decoder.update(motor_spikes)
+            rates = self._decoder.get_rates_hz()
+
+            # 3. Biological motor decoding
+            action = self._decode_biological(rates)
+
+            for _ in range(self._flygym_steps_per_coupling):
+                self._sim.set_actuator_inputs("nmf", ActuatorType.POSITION, action)
+                self._sim.step()
+
+            # 4. Read sensors
+            joint_angles = self._sim.get_joint_angles("nmf")
+            body_vel = self._data.qvel[0:3].copy()
+            self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
+            # 5. Compute instantaneous reward (forward displacement this step)
+            current_x = float(self._data.qpos[0])
+            instant_reward = current_x - prev_x
+            prev_x = current_x
+            total_displacement += instant_reward
+
+            # 6. Accumulate weighted eligibility contribution
+            # Pull eligibility every step — it is updated each coupling step
+            # by the STDP rule, so pulling it here captures the current trace.
+            eligibility = self._gpu_backend.get_eligibility()
+            reward_error = instant_reward - self._reward_baseline
+            accumulated_dw += effective_lr * eligibility * reward_error
+
+            # Update EMA baseline
+            self._reward_baseline = (
+                0.99 * self._reward_baseline + 0.01 * instant_reward
+            )
+
+            steps_since_update += 1
+
+            # 7. Batch weight update every continuous_update_interval steps
+            if steps_since_update >= self.continuous_update_interval:
+                self._current_weights = self._current_weights + accumulated_dw
+
+                # Enforce Dale's principle
+                exc_mask = self._sign_vector[self._sources] > 0
+                inh_mask = self._sign_vector[self._sources] < 0
+                self._current_weights[exc_mask] = np.maximum(
+                    self._current_weights[exc_mask], 0.0
+                )
+                self._current_weights[inh_mask] = np.minimum(
+                    self._current_weights[inh_mask], 0.0
+                )
+
+                # Apply updated weights to GPU backend for next batch
+                # (convert mV -> nA as PyGeNN uses nA internally)
+                weights_nA = (
+                    self._current_weights * self._gpu_backend._MV_TO_NA
+                ).astype(np.float32)
+                self._gpu_backend._syn.vars["g"].values = weights_nA
+                self._gpu_backend._syn.vars["g"].push_to_device()
+
+                accumulated_dw[:] = 0.0
+                steps_since_update = 0
+
+        # Flush any remaining accumulated updates
+        if steps_since_update > 0 and np.any(accumulated_dw != 0):
+            self._current_weights = self._current_weights + accumulated_dw
+            exc_mask = self._sign_vector[self._sources] > 0
+            inh_mask = self._sign_vector[self._sources] < 0
+            self._current_weights[exc_mask] = np.maximum(
+                self._current_weights[exc_mask], 0.0
+            )
+            self._current_weights[inh_mask] = np.minimum(
+                self._current_weights[inh_mask], 0.0
+            )
+
+        # Store for reporting
+        self._episode_total_displacement = total_displacement
 
     def _compute_firing_rates(self) -> np.ndarray:
         if self._backend_type == "gpu":
@@ -847,6 +986,7 @@ class FunctionalTrainingHarness:
         print("=" * 70)
         print("Functional Training Harness: Biological Locomotor Circuit")
         print(f"  Backend: {self._backend_type.upper()}")
+        print(f"  Reward mode: {self.reward_mode.upper()}")
         print(f"  Hops: {self.n_hops}")
         print(f"  Neurons: {self._n_neurons} "
               f"({len(self._motor_neuron_indices)} motor + "
@@ -855,6 +995,9 @@ class FunctionalTrainingHarness:
         print(f"  Episodes: {self.n_episodes}")
         print(f"  Episode length: {self.episode_length_s}s")
         print(f"  Learning rate: {self.learning_rate} mV")
+        if self.reward_mode == "continuous":
+            print(f"  Continuous update interval: {self.continuous_update_interval} steps "
+                  f"(every {self.continuous_update_interval * self.coupling_dt_ms:.0f} ms)")
         print(f"  STDP tau: {self.tau_stdp_ms} ms")
         print(f"  Homeostatic eta: {self.eta_homeo} mV/Hz")
         print(f"  Target rate: {self.target_rate} Hz")
@@ -884,14 +1027,29 @@ class FunctionalTrainingHarness:
             self._reset_episode()
             self._run_episode()
 
-            reward = self._compute_reward()
+            # In continuous mode, total displacement is tracked inside
+            # _run_episode_gpu_continuous(); weight update already done.
+            if self.reward_mode == "continuous":
+                reward = float(getattr(self, "_episode_total_displacement", 0.0))
+                # Build a minimal weight stats dict for logging
+                w_stats = {
+                    "dopamine": float(getattr(self, "_reward_baseline", 0.0)),
+                    "mean_eligibility": float("nan"),
+                    "mean_abs_dw": float("nan"),
+                    "max_abs_dw": float("nan"),
+                    "weight_mean": float(np.mean(self._current_weights)),
+                    "weight_std": float(np.std(self._current_weights)),
+                }
+            else:
+                reward = self._compute_reward()
+                w_stats = self._update_weights(reward, rewards)
+
             rewards.append(reward)
 
             firing_rates = self._compute_firing_rates()
             mean_rate = float(np.mean(firing_rates))
             firing_rates_list.append(mean_rate)
 
-            w_stats = self._update_weights(reward, rewards)
             weight_stats_list.append(w_stats)
 
             h_stats = self._apply_homeostatic_plasticity(firing_rates)
@@ -906,7 +1064,10 @@ class FunctionalTrainingHarness:
             print(f"  Reward (forward distance): {reward:.4f} mm")
             print(f"  Mean firing rate: {mean_rate:.1f} Hz "
                   f"(target: {self.target_rate} Hz)")
-            print(f"  Dopamine signal: {w_stats['dopamine']:.4f}")
+            if self.reward_mode == "continuous":
+                print(f"  Reward baseline (EMA): {w_stats['dopamine']:.6f}")
+            else:
+                print(f"  Dopamine signal: {w_stats['dopamine']:.4f}")
             print(f"  Threshold: mean={h_stats['threshold_mean']:.2f} mV, "
                   f"std={h_stats['threshold_std']:.3f} mV")
             print(f"  Episode wall time: {t_ep:.1f}s")
@@ -967,6 +1128,8 @@ class FunctionalTrainingHarness:
                 "eta_homeo": self.eta_homeo,
                 "target_rate": self.target_rate,
                 "lambda_decay": self.lambda_decay,
+                "reward_mode": self.reward_mode,
+                "continuous_update_interval": self.continuous_update_interval,
                 "mode": "functional_biological",
             },
             "episodes": [],
@@ -1311,6 +1474,8 @@ def run_functional_training(
     n_hops=2,
     backend="gpu",
     eta_homeo=0.01,
+    reward_mode="episodic",
+    learning_rate=0.001,
 ):
     """Run functional training (biological locomotor circuit + STDP).
 
@@ -1326,17 +1491,22 @@ def run_functional_training(
         Neural simulator backend: "gpu" (default) or "cpu".
     eta_homeo : float
         Homeostatic plasticity learning rate (default 0.01).
+    reward_mode : str
+        "episodic" (default) or "continuous".
+    learning_rate : float
+        STDP weight update learning rate (default 0.001).
     """
     print(f"\nStarting functional training "
           f"({episodes} episodes, {episode_length}s each, "
           f"{n_hops} hop(s), {backend.upper()} backend, "
-          f"eta_homeo={eta_homeo})...\n")
+          f"reward_mode={reward_mode}, "
+          f"eta_homeo={eta_homeo}, lr={learning_rate})...\n")
 
     harness = FunctionalTrainingHarness(
         n_episodes=episodes,
         episode_length_s=episode_length,
         coupling_dt_ms=2.0,
-        learning_rate=0.001,
+        learning_rate=learning_rate,
         tau_stdp_ms=20.0,
         tau_eligibility_s=1.0,
         motor_gain=0.3,
@@ -1350,11 +1520,14 @@ def run_functional_training(
         force_rebuild=force_rebuild,
         n_hops=n_hops,
         backend=backend,
+        reward_mode=reward_mode,
     )
 
     suffix = f"_functional_{n_hops}hop"
     if harness._backend_type == "gpu":
         suffix += "_gpu"
+    if reward_mode == "continuous":
+        suffix += "_continuous"
     log_path = _DEFAULT_REPORTS_DIR / f"functional_training_log{suffix}.json"
     checkpoint_dir = _DEFAULT_REPORTS_DIR / f"checkpoints_functional{suffix}"
 
