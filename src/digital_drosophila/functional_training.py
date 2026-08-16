@@ -1014,7 +1014,10 @@ class FunctionalTrainedController:
     Conforms to the Controller protocol: reset(), step(), done, get_metrics(), close().
     """
 
-    def __init__(self, checkpoint_path, episode_length_s=5.0):
+    # Maps neuron count -> n_hops for auto-detection
+    _NEURON_COUNT_TO_HOPS = {248: 1, 398: 2, 498: 3}
+
+    def __init__(self, checkpoint_path, episode_length_s=5.0, n_hops=None):
         import numpy as np
 
         self._checkpoint_path = Path(checkpoint_path)
@@ -1029,6 +1032,14 @@ class FunctionalTrainedController:
             self._ckpt_body_ids = list(ckpt["body_ids"].astype(int))
         else:
             self._ckpt_body_ids = None
+
+        # Auto-detect n_hops from checkpoint body_ids length if not provided
+        if n_hops is None:
+            n_neurons = len(self._trained_thresholds)
+            n_hops = self._NEURON_COUNT_TO_HOPS.get(n_neurons, 1)
+            print(f"[FunctionalTrainedController] Auto-detected n_hops={n_hops} "
+                  f"from checkpoint size ({n_neurons} neurons)")
+        self._n_hops = n_hops
 
         self._build()
 
@@ -1050,9 +1061,11 @@ class FunctionalTrainedController:
             load_network_snapshot, build_motor_actuator_map
         )
 
-        # Load network snapshot
+        # Load network snapshot matching the training hop count
         (body_ids, meta_df, motor_leg_map,
-         sources_coo, targets_coo, weights_coo) = load_network_snapshot()
+         sources_coo, targets_coo, weights_coo) = load_network_snapshot(
+            n_hops=self._n_hops
+        )
 
         self._body_ids = body_ids
         self._meta_df = meta_df
