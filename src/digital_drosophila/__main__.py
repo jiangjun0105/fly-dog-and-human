@@ -12,7 +12,7 @@ Usage:
     python -m digital_drosophila learn stdp_basic [--episodes N]
     python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0] [--topology biological|random] [--backend cpu|gpu]
     python -m digital_drosophila learn train_gpu [--episodes 50] [--episode-length 2.0]
-    python -m digital_drosophila learn train_functional [--episodes 50] [--episode-length 2.0] [--force-rebuild]
+    python -m digital_drosophila learn train_functional [--episodes 50] [--hops 2] [--episode-length 2.0] [--force-rebuild] [--backend gpu|cpu]
     python -m digital_drosophila learn evaluate --checkpoint PATH [--episodes 3] [--duration 5.0]
     python -m digital_drosophila learn experiment [--episodes 50] [--episode-length 2.0]
     python -m digital_drosophila demo video [--duration 3.0] [--fps 30]
@@ -192,10 +192,12 @@ def main():
             run_evaluation(checkpoint, episodes=episodes, duration=duration)
 
         elif subcommand == "train_functional":
-            # Parse --episodes, --episode-length, --force-rebuild
+            # Parse --episodes, --hops, --episode-length, --force-rebuild, --backend
             episodes = 50
             episode_length = 2.0
             force_rebuild = False
+            n_hops = 2
+            backend = "gpu"
             for i, arg in enumerate(args[2:], start=2):
                 if arg == "--episodes" and i + 1 < len(args):
                     try:
@@ -209,6 +211,22 @@ def main():
                     except ValueError:
                         print(f"Invalid episode-length value: {args[i + 1]!r}")
                         sys.exit(1)
+                elif arg == "--hops" and i + 1 < len(args):
+                    try:
+                        n_hops = int(args[i + 1])
+                        if n_hops < 1 or n_hops > 3:
+                            print(f"Invalid hops value: {args[i + 1]!r}. "
+                                  "Choose 1, 2, or 3.")
+                            sys.exit(1)
+                    except ValueError:
+                        print(f"Invalid hops value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--backend" and i + 1 < len(args):
+                    backend = args[i + 1]
+                    if backend not in ("cpu", "gpu"):
+                        print(f"Invalid backend: {backend!r}. "
+                              "Choose 'cpu' or 'gpu'.")
+                        sys.exit(1)
                 elif arg == "--force-rebuild":
                     force_rebuild = True
 
@@ -218,6 +236,8 @@ def main():
                 episodes=episodes,
                 episode_length=episode_length,
                 force_rebuild=force_rebuild,
+                n_hops=n_hops,
+                backend=backend,
             )
 
         elif subcommand == "experiment":
@@ -249,7 +269,8 @@ def main():
                 "\n  stdp_basic [--episodes N]"
                 "\n  train [--episodes N] [--episode-length S] [--topology bio|random] [--backend cpu|gpu]"
                 "\n  train_gpu [--episodes N] [--episode-length S]"
-                "\n  train_functional [--episodes N] [--episode-length S] [--force-rebuild]"
+                "\n  train_functional [--episodes N] [--hops 1|2|3] [--episode-length S] "
+                "[--backend gpu|cpu] [--force-rebuild]"
                 "\n  evaluate --checkpoint PATH [--episodes N] [--duration S]"
                 "\n  experiment [--episodes N] [--episode-length S]"
             )

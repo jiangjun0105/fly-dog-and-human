@@ -55,6 +55,11 @@ class FunctionalTrainingHarness:
     random_seed : int
     force_rebuild : bool
         If True, re-query neuPrint even if a cached snapshot exists.
+    n_hops : int
+        Number of upstream hops for neuron selection (default 2).
+    backend : str
+        Neural simulator backend: "gpu" (PyGeNN, default) or "cpu" (Brian2).
+        Falls back to "cpu" automatically if GPU is unavailable.
     """
 
     def __init__(
@@ -75,6 +80,8 @@ class FunctionalTrainingHarness:
         checkpoint_interval=10,
         random_seed=42,
         force_rebuild=False,
+        n_hops=2,
+        backend="gpu",
     ):
         self.n_episodes = n_episodes
         self.episode_length_s = episode_length_s
@@ -92,9 +99,25 @@ class FunctionalTrainingHarness:
         self.checkpoint_interval = checkpoint_interval
         self.random_seed = random_seed
         self.force_rebuild = force_rebuild
+        self.n_hops = n_hops
+
+        # Resolve backend — fall back to cpu if GPU unavailable
+        if backend == "gpu":
+            try:
+                import pygenn  # noqa: F401
+                self._backend_type = "gpu"
+            except ImportError:
+                print("[FunctionalTrainingHarness] pygenn not available, "
+                      "falling back to CPU (Brian2)")
+                self._backend_type = "cpu"
+        else:
+            self._backend_type = "cpu"
 
         os.environ.setdefault("MUJOCO_GL", "egl")
-        self._build()
+        if self._backend_type == "gpu":
+            self._build_gpu()
+        else:
+            self._build()
 
     def _build(self):
         """Build functional network + Brian2 + FlyGym."""
@@ -116,10 +139,11 @@ class FunctionalTrainingHarness:
         # ------------------------------------------------------------------
         # Load functional network
         # ------------------------------------------------------------------
-        print("[build] Loading functional locomotor network...")
+        print(f"[build] Loading functional locomotor network ({self.n_hops} hop(s))...")
         (self._body_ids, self._meta_df, self._motor_leg_map,
          sources_coo, targets_coo, weights_coo) = get_or_build_network(
             force_rebuild=self.force_rebuild,
+            n_hops=self.n_hops,
         )
 
         self._n_neurons = len(self._body_ids)
@@ -340,6 +364,162 @@ class FunctionalTrainingHarness:
 
         print("[build] Done.")
 
+    def _build_gpu(self):
+        """Build functional network + PyGeNN GPU backend + FlyGym."""
+        import scipy.sparse as sp
+
+        from .constants import NT_SIGN_MAP
+        from .locomotion import build_simulation, settle_simulation
+        from .sensory_encoder import SensoryEncoder
+        from .motor_adapter import SpikeRateDecoder
+        from .functional_selection import get_or_build_network, build_motor_actuator_map
+        from .gpu_backend import PyGeNNBackend
+
+        # ------------------------------------------------------------------
+        # Load functional network
+        # ------------------------------------------------------------------
+        print(f"[build_gpu] Loading functional locomotor network ({self.n_hops} hop(s))...")
+        (self._body_ids, self._meta_df, self._motor_leg_map,
+         sources_coo, targets_coo, weights_coo) = get_or_build_network(
+            force_rebuild=self.force_rebuild,
+            n_hops=self.n_hops,
+        )
+
+        self._n_neurons = len(self._body_ids)
+        bid_to_idx = {int(bid): i for i, bid in enumerate(self._body_ids)}
+
+        # Motor neuron network indices
+        self._motor_neuron_indices = [
+            bid_to_idx[int(bid)]
+            for bid in self._motor_leg_map.keys()
+            if int(bid) in bid_to_idx
+        ]
+
+        # Ascending neuron network indices
+        ascending_bids = self._meta_df[
+            self._meta_df["superclass"] == "ascending_neuron"
+        ]["bodyId"].values
+        self._ascending_indices = [
+            bid_to_idx[int(bid)]
+            for bid in ascending_bids
+            if int(bid) in bid_to_idx
+        ]
+
+        # Descending neuron indices (for extra background current)
+        descending_bids = self._meta_df[
+            self._meta_df["superclass"] == "descending_neuron"
+        ]["bodyId"].values
+        self._descending_indices = [
+            bid_to_idx[int(bid)]
+            for bid in descending_bids
+            if int(bid) in bid_to_idx
+        ]
+
+        print(f"[build_gpu] Network: {self._n_neurons} neurons "
+              f"({len(self._motor_neuron_indices)} motor, "
+              f"{len(self._ascending_indices)} ascending, "
+              f"{len(self._descending_indices)} descending)")
+
+        # ------------------------------------------------------------------
+        # Build sign vector from neurotransmitter types
+        # ------------------------------------------------------------------
+        nt_series = self._meta_df["consensusNt"].fillna("unknown")
+        confidence = self._meta_df["predictedNtConfidence"].fillna(0.5).values
+        self._sign_vector = np.array(
+            [NT_SIGN_MAP.get(nt, 0) or 0 for nt in nt_series]
+        )
+        self._confidence = confidence
+
+        self._sources = sources_coo
+        self._targets = targets_coo
+
+        # ------------------------------------------------------------------
+        # Compute initial weights (same formula as CPU path)
+        # ------------------------------------------------------------------
+        inh_attenuation = 0.5
+        scale = 0.6
+        sign_scale = np.where(
+            self._sign_vector[sources_coo] >= 0, 1.0, inh_attenuation
+        )
+        weights_raw = (
+            np.log1p(weights_coo)
+            * self._sign_vector[sources_coo]
+            * confidence[sources_coo]
+            * sign_scale
+            * scale
+        )
+
+        self._initial_weights = weights_raw.copy()
+        self._thresholds_mV = np.full(self._n_neurons, -50.0)
+
+        # ------------------------------------------------------------------
+        # Build PyGeNN backend
+        # ------------------------------------------------------------------
+        adj_sparse = sp.coo_matrix(
+            (np.ones(len(sources_coo)), (sources_coo, targets_coo)),
+            shape=(self._n_neurons, self._n_neurons),
+        )
+
+        print("[build_gpu] Building PyGeNN GPU backend (CUDA compilation)...")
+        self._gpu_backend = PyGeNNBackend(
+            adj_sparse,
+            weights_raw,
+            self._thresholds_mV,
+            self._motor_neuron_indices,
+            self._ascending_indices,
+            dt_ms=0.1,
+            coupling_dt_ms=self.coupling_dt_ms,
+            tau_stdp_ms=self.tau_stdp_ms,
+            tau_eligibility_ms=self.tau_eligibility_s * 1000.0,
+        )
+        self._gpu_backend.build()
+        print("[build_gpu] PyGeNN backend ready.")
+
+        # ------------------------------------------------------------------
+        # FlyGym body
+        # ------------------------------------------------------------------
+        sim, fly, model, data, neutral_ctrl, actuator_names = build_simulation()
+        settle_simulation(sim, n_steps=2000)
+
+        self._sim = sim
+        self._fly = fly
+        self._model = model
+        self._data = data
+        self._neutral_ctrl = neutral_ctrl
+        self._initial_qpos = data.qpos.copy()
+        self._initial_qvel = data.qvel.copy()
+
+        flygym_dt_s = model.opt.timestep
+        self._flygym_steps_per_coupling = int(
+            self.coupling_dt_ms / (flygym_dt_s * 1000)
+        )
+
+        # ------------------------------------------------------------------
+        # Adapters
+        # ------------------------------------------------------------------
+        sensory_gain_pa = self.sensory_gain / 1e-12
+        self._encoder = SensoryEncoder(
+            self._ascending_indices,
+            n_neurons=self._n_neurons,
+            n_actuated=66,
+            gain_pa=sensory_gain_pa,
+            vel_gain_pa=sensory_gain_pa * 0.6,
+        )
+        self._decoder = SpikeRateDecoder(
+            self._motor_neuron_indices,
+            window_ms=50.0,
+            dt_ms=self.coupling_dt_ms,
+        )
+
+        # Biological motor mapping: network_index -> list of actuator indices
+        self._motor_actuator_map = build_motor_actuator_map(
+            self._motor_leg_map, self._body_ids
+        )
+
+        print(f"[build_gpu] Motor actuator map: {len(self._motor_actuator_map)} neurons "
+              f"each driving up to 3 actuators")
+        print("[build_gpu] Done.")
+
     def _decode_biological(self, rates_hz: dict[int, float]) -> np.ndarray:
         """Convert motor neuron spike rates to actuator positions using biological mapping.
 
@@ -382,6 +562,9 @@ class FunctionalTrainingHarness:
 
     def _reset_episode(self):
         """Reset network and body for a new episode."""
+        if self._backend_type == "gpu":
+            return self._reset_episode_gpu()
+
         import brian2
         from brian2 import ms as brian_ms, mV as brian_mV, pA
         from .motor_adapter import SpikeRateDecoder
@@ -426,8 +609,53 @@ class FunctionalTrainingHarness:
         body_vel = self._data.qvel[0:3].copy()
         self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
 
+    def _reset_episode_gpu(self):
+        """Reset GPU backend and body for a new episode."""
+        import mujoco
+        from .motor_adapter import SpikeRateDecoder
+
+        # Reset GPU backend with current weights and thresholds
+        self._gpu_backend.reset(self._current_weights, self._thresholds_mV)
+
+        # Build background tonic current:
+        # 180 pA for all neurons, +30 pA for descending neurons.
+        bg_current_pA = 180.0
+        descending_extra_pA = 30.0
+        self._gpu_bg_currents = np.full(self._n_neurons, bg_current_pA, dtype=np.float32)
+        self._gpu_bg_currents[self._descending_indices] += descending_extra_pA
+
+        # Run burn-in on GPU (250 coupling steps = 500ms at 2ms/step)
+        burn_in_steps = int(500.0 / self.coupling_dt_ms)
+        for _ in range(burn_in_steps):
+            self._gpu_backend.step(self._gpu_bg_currents)
+
+        # Reset spike counts after burn-in
+        self._gpu_backend._spike_counts[:] = 0
+
+        # Reset body
+        self._data.qpos[:] = self._initial_qpos
+        self._data.qvel[:] = self._initial_qvel
+        self._data.ctrl[:] = self._neutral_ctrl
+        mujoco.mj_forward(self._model, self._data)
+
+        # Reset decoder
+        self._decoder = SpikeRateDecoder(
+            self._motor_neuron_indices,
+            window_ms=50.0,
+            dt_ms=self.coupling_dt_ms,
+        )
+
+        self._episode_start_pos = self._data.qpos[0:3].copy()
+
+        joint_angles = self._sim.get_joint_angles("nmf")
+        body_vel = self._data.qvel[0:3].copy()
+        self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
     def _run_episode(self):
         """Run one closed-loop episode."""
+        if self._backend_type == "gpu":
+            return self._run_episode_gpu()
+
         import brian2
         from brian2 import ms as brian_ms, pA
         from flygym.compose import ActuatorType
@@ -471,7 +699,40 @@ class FunctionalTrainingHarness:
             body_vel = self._data.qvel[0:3].copy()
             self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
 
+    def _run_episode_gpu(self):
+        """Run one closed-loop episode using the GPU backend."""
+        from flygym.compose import ActuatorType
+
+        n_steps = int(self.episode_length_s * 1000 / self.coupling_dt_ms)
+
+        for _step in range(n_steps):
+            # 1. Step GPU neural simulation with sensory + background currents
+            # Sensory currents from encoder are in Amps; convert to pA (×1e12)
+            sensory_pA = self._sensory_currents * 1e12
+            combined_currents = sensory_pA + self._gpu_bg_currents
+            motor_spikes = self._gpu_backend.step(combined_currents)
+
+            # 2. Decode motor spikes
+            self._decoder.update(motor_spikes)
+            rates = self._decoder.get_rates_hz()
+
+            # 3. Biological motor decoding
+            action = self._decode_biological(rates)
+
+            for _ in range(self._flygym_steps_per_coupling):
+                self._sim.set_actuator_inputs("nmf", ActuatorType.POSITION, action)
+                self._sim.step()
+
+            # 4. Read sensors
+            joint_angles = self._sim.get_joint_angles("nmf")
+            body_vel = self._data.qvel[0:3].copy()
+            self._sensory_currents = self._encoder.encode(joint_angles, body_vel)
+
     def _compute_firing_rates(self) -> np.ndarray:
+        if self._backend_type == "gpu":
+            counts = self._gpu_backend.get_spike_counts().astype(float)
+            return counts / self.episode_length_s
+
         if self._M.num_spikes > 0:
             spike_indices = np.array(self._M.i[:])
             spike_counts = np.bincount(
@@ -494,7 +755,10 @@ class FunctionalTrainingHarness:
             baseline = 0.0
         dopamine = reward - baseline
 
-        eligibility = np.array(self._S.eligibility[:])
+        if self._backend_type == "gpu":
+            eligibility = self._gpu_backend.get_eligibility()
+        else:
+            eligibility = np.array(self._S.eligibility[:])
         dw = self.learning_rate * eligibility * dopamine
         self._current_weights = self._current_weights + dw
 
@@ -534,7 +798,10 @@ class FunctionalTrainingHarness:
         }
 
     def _apply_synaptic_decay(self) -> dict:
-        eligibility = np.array(self._S.eligibility[:])
+        if self._backend_type == "gpu":
+            eligibility = self._gpu_backend.get_eligibility()
+        else:
+            eligibility = np.array(self._S.eligibility[:])
         inactive_mask = np.abs(eligibility) < self.eligibility_decay_threshold
         self._current_weights[inactive_mask] *= (1.0 - self.lambda_decay)
 
@@ -579,6 +846,8 @@ class FunctionalTrainingHarness:
         """
         print("=" * 70)
         print("Functional Training Harness: Biological Locomotor Circuit")
+        print(f"  Backend: {self._backend_type.upper()}")
+        print(f"  Hops: {self.n_hops}")
         print(f"  Neurons: {self._n_neurons} "
               f"({len(self._motor_neuron_indices)} motor + "
               f"{len(self._ascending_indices)} ascending + premotor)")
@@ -731,6 +1000,9 @@ class FunctionalTrainingHarness:
         return path
 
     def close(self):
+        if hasattr(self, "_gpu_backend") and self._gpu_backend is not None:
+            self._gpu_backend.close()
+            self._gpu_backend = None
         if hasattr(self, "_sim") and self._sim is not None:
             self._sim.close()
             self._sim = None
@@ -1023,6 +1295,8 @@ def run_functional_training(
     episodes=50,
     episode_length=2.0,
     force_rebuild=False,
+    n_hops=2,
+    backend="gpu",
 ):
     """Run functional training (biological locomotor circuit + STDP).
 
@@ -1032,9 +1306,14 @@ def run_functional_training(
     episode_length : float
     force_rebuild : bool
         Re-query neuPrint even if cached.
+    n_hops : int
+        Number of upstream hops for neuron selection (default 2).
+    backend : str
+        Neural simulator backend: "gpu" (default) or "cpu".
     """
     print(f"\nStarting functional training "
-          f"({episodes} episodes, {episode_length}s each)...\n")
+          f"({episodes} episodes, {episode_length}s each, "
+          f"{n_hops} hop(s), {backend.upper()} backend)...\n")
 
     harness = FunctionalTrainingHarness(
         n_episodes=episodes,
@@ -1052,10 +1331,15 @@ def run_functional_training(
         eligibility_decay_threshold=0.01,
         checkpoint_interval=10,
         force_rebuild=force_rebuild,
+        n_hops=n_hops,
+        backend=backend,
     )
 
-    log_path = _DEFAULT_REPORTS_DIR / "functional_training_log.json"
-    checkpoint_dir = _DEFAULT_REPORTS_DIR / "checkpoints_functional"
+    suffix = f"_functional_{n_hops}hop"
+    if harness._backend_type == "gpu":
+        suffix += "_gpu"
+    log_path = _DEFAULT_REPORTS_DIR / f"functional_training_log{suffix}.json"
+    checkpoint_dir = _DEFAULT_REPORTS_DIR / f"checkpoints_functional{suffix}"
 
     try:
         results = harness.train(checkpoint_dir=checkpoint_dir)

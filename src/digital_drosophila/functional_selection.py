@@ -1,6 +1,6 @@
 """Functional neuron selection: biologically-mapped motor and premotor neurons.
 
-Selects a tractable (200-300 neuron) subset of the VNC connectome that forms
+Selects a tractable (200-600 neuron) subset of the VNC connectome that forms
 a genuine locomotor circuit, instead of the 100-hub-neuron sample used
 previously.
 
@@ -10,9 +10,12 @@ Strategy
 2. Map each motor neuron to a FlyGym leg (LF/RF/LM/RM/LH/RH) via exitNerve +
    somaSide.
 3. Take the top N motor neurons per leg by postsynaptic synapse count.
-4. Trace 1 hop upstream via fetch_adjacencies to find the strongest premotor
+4. Trace n_hops upstream via fetch_adjacencies to find the strongest premotor
    interneurons (by total weight onto the motor pool).
-5. Keep the top P premotor neurons, giving a total of ~200-300 neurons.
+   - Hop 1: top 200 presynaptic partners of the 48 motor neurons
+   - Hop 2: top 150 presynaptic partners of the hop-1 neurons (~400 total)
+   - Hop 3: top 100 presynaptic partners of the hop-2 neurons (~500-600 total)
+5. Keep unique neurons across all hops.
 
 The returned adjacency data is sparse COO (load_connectivity_sparse).
 
@@ -21,7 +24,7 @@ Usage
     from digital_drosophila.functional_selection import select_locomotor_network
 
     body_ids, meta_df, motor_leg_map, sources, targets, weights = (
-        select_locomotor_network()
+        select_locomotor_network(n_hops=2)
     )
 """
 
@@ -44,8 +47,10 @@ ALL_LEG_NERVES = T1_NERVES | T2_NERVES | T3_NERVES
 # Number of motor neurons to select per leg (both sides combined before split)
 MOTOR_TOP_N_PER_LEG = 8
 
-# Number of strongest premotor neurons to include (by total weight onto motor pool)
+# Number of strongest premotor neurons to include per hop
+# Hop 1: top 200, Hop 2: top 150, Hop 3: top 100
 PREMOTOR_TOP_N = 200
+PREMOTOR_TOP_N_PER_HOP = [200, 150, 100]
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _PACKAGE_DIR.parent.parent
@@ -69,6 +74,7 @@ def _assign_leg(exit_nerve: str, soma_side: str) -> str | None:
 def select_locomotor_network(
     motor_top_n: int = MOTOR_TOP_N_PER_LEG,
     premotor_top_n: int = PREMOTOR_TOP_N,
+    n_hops: int = 1,
 ) -> tuple[
     list[int],           # ordered body IDs
     pd.DataFrame,        # neuron metadata
@@ -85,8 +91,15 @@ def select_locomotor_network(
         Number of top motor neurons per leg to include (selected by postsynaptic
         synapse count).
     premotor_top_n : int
-        Number of strongest premotor interneurons to include (selected by total
-        summed weight onto the chosen motor pool).
+        Number of strongest premotor interneurons to include for hop 1 (selected
+        by total summed weight onto the chosen motor pool). For hops 2+, the
+        counts are taken from PREMOTOR_TOP_N_PER_HOP.
+    n_hops : int
+        Number of upstream hops to trace from motor neurons (default 1).
+        - Hop 1: top 200 presynaptic partners of the 48 motor neurons
+        - Hop 2: top 150 presynaptic partners of the hop-1 neurons
+        - Hop 3: top 100 presynaptic partners of the hop-2 neurons
+        Neurons already selected are excluded at each hop (no duplicates).
 
     Returns
     -------
@@ -135,38 +148,67 @@ def select_locomotor_network(
           f"({motor_top_n} per leg × 6 legs)")
 
     # ------------------------------------------------------------------
-    # Step 3: find strongest premotor neurons (1 hop upstream)
+    # Step 3: multi-hop upstream tracing
     # ------------------------------------------------------------------
-    print("[functional_selection] Fetching upstream connections "
-          "(1-hop, motor neurons as post)...")
-    _, conn_df = fetch_adjacencies(None, NeuronCriteria(bodyId=motor_ids))
+    # Per-hop top-N counts: use PREMOTOR_TOP_N_PER_HOP list, falling back
+    # to [premotor_top_n] for hop 1 and halving each subsequent hop.
+    hop_top_ns = list(PREMOTOR_TOP_N_PER_HOP)
+    # Patch hop 1 count in case premotor_top_n was customised
+    hop_top_ns[0] = premotor_top_n
 
-    if conn_df.empty:
-        premotor_ids: list[int] = []
-    else:
-        # Sum weight per presynaptic neuron across all motor targets
+    # Track all selected neurons (motor + premotor added each hop)
+    all_selected_ids = list(motor_ids)
+    all_selected_set = set(motor_ids)
+    vnc_id_set = set(neurons_df["bodyId"].values)
+
+    # The "frontier" neurons whose upstream partners we query each hop
+    frontier_ids = motor_ids
+
+    for hop in range(1, n_hops + 1):
+        top_n = hop_top_ns[hop - 1] if hop - 1 < len(hop_top_ns) else 50
+        print(f"[functional_selection] Hop {hop}: fetching upstream of "
+              f"{len(frontier_ids)} neurons (top {top_n})...")
+
+        _, conn_df = fetch_adjacencies(None, NeuronCriteria(bodyId=frontier_ids))
+
+        if conn_df.empty:
+            print(f"[functional_selection] Hop {hop}: no connections found, stopping.")
+            break
+
+        # Sum weight per presynaptic neuron across all frontier targets
         agg = (
             conn_df.groupby("bodyId_pre")["weight"]
             .sum()
             .reset_index()
             .sort_values("weight", ascending=False)
         )
-        # Exclude neurons already in the motor pool
-        agg = agg[~agg["bodyId_pre"].isin(motor_id_set)]
+        # Exclude neurons already selected (no duplicates)
+        agg = agg[~agg["bodyId_pre"].isin(all_selected_set)]
 
         # Filter to neurons present in the VNC dataset (ensures metadata)
-        vnc_id_set = set(neurons_df["bodyId"].values)
         agg = agg[agg["bodyId_pre"].isin(vnc_id_set)]
 
-        top_premotor = agg.head(premotor_top_n)
-        premotor_ids = list(top_premotor["bodyId_pre"].values)
+        new_premotor = list(agg.head(top_n)["bodyId_pre"].values)
 
-    print(f"[functional_selection] Selected {len(premotor_ids)} premotor neurons")
+        print(f"[functional_selection] Hop {hop}: added {len(new_premotor)} neurons")
+
+        all_selected_ids.extend(new_premotor)
+        all_selected_set.update(new_premotor)
+
+        # The newly added neurons become the frontier for the next hop
+        frontier_ids = new_premotor
+
+        if not frontier_ids:
+            break
+
+    premotor_ids = [bid for bid in all_selected_ids if bid not in motor_id_set]
+    print(f"[functional_selection] Total premotor neurons across all hops: "
+          f"{len(premotor_ids)}")
 
     # ------------------------------------------------------------------
     # Step 4: assemble final network
     # ------------------------------------------------------------------
-    all_body_ids = motor_ids + [bid for bid in premotor_ids if bid not in motor_id_set]
+    all_body_ids = motor_ids + premotor_ids
 
     # Build metadata DataFrame for the full network
     meta_df = neurons_df[neurons_df["bodyId"].isin(all_body_ids)].copy()
@@ -188,7 +230,7 @@ def select_locomotor_network(
 
     print(f"[functional_selection] Total network: {len(all_body_ids)} neurons")
     print(f"  Motor neurons:   {len(motor_ids)}")
-    print(f"  Premotor neurons:{len(premotor_ids)}")
+    print(f"  Premotor neurons:{len(premotor_ids)} ({n_hops} hop(s))")
 
     # ------------------------------------------------------------------
     # Step 5: load sparse connectivity
@@ -306,6 +348,7 @@ def save_network_snapshot(
 
 def load_network_snapshot(
     snapshot_dir: Path | None = None,
+    n_hops: int = 1,
 ) -> tuple[list[int], pd.DataFrame, dict[int, str], np.ndarray, np.ndarray, np.ndarray]:
     """Load a previously saved network snapshot from disk (bypasses neuPrint).
 
@@ -313,14 +356,17 @@ def load_network_snapshot(
     ----------
     snapshot_dir : Path, optional
         Directory containing connectivity.npz, body_ids.npy, meta.csv,
-        motor_leg_map.csv. Defaults to data/cache/functional_network/.
+        motor_leg_map.csv. If None, defaults based on n_hops.
+    n_hops : int
+        Number of hops used to build the snapshot (used to select the correct
+        default directory when snapshot_dir is None).
 
     Returns
     -------
     Same as select_locomotor_network().
     """
     if snapshot_dir is None:
-        snapshot_dir = _CACHE_DIR / "functional_network"
+        snapshot_dir = _snapshot_dir_for_hops(n_hops)
     snapshot_dir = Path(snapshot_dir)
 
     body_ids = list(np.load(snapshot_dir / "body_ids.npy").astype(int))
@@ -339,24 +385,49 @@ def load_network_snapshot(
     return body_ids, meta_df, motor_leg_map, sources, targets, weights
 
 
+def _snapshot_dir_for_hops(n_hops: int) -> Path:
+    """Return the snapshot directory for a given hop count.
+
+    n_hops=1 maps to the legacy ``functional_network`` directory so that
+    existing 1-hop caches continue to work without migration.
+    n_hops>1 maps to ``functional_network_<n_hops>hop``.
+    """
+    if n_hops == 1:
+        return _CACHE_DIR / "functional_network"
+    return _CACHE_DIR / f"functional_network_{n_hops}hop"
+
+
 def get_or_build_network(
     motor_top_n: int = MOTOR_TOP_N_PER_LEG,
     premotor_top_n: int = PREMOTOR_TOP_N,
     force_rebuild: bool = False,
+    n_hops: int = 1,
 ) -> tuple[list[int], pd.DataFrame, dict[int, str], np.ndarray, np.ndarray, np.ndarray]:
     """Return cached network snapshot, building it if necessary.
 
     On first call (or when force_rebuild=True), queries neuPrint and writes
     a snapshot. Subsequent calls load from disk instantly.
+
+    Parameters
+    ----------
+    motor_top_n : int
+        Top motor neurons per leg.
+    premotor_top_n : int
+        Top premotor neurons for hop 1.
+    force_rebuild : bool
+        Re-query neuPrint even if a cached snapshot exists.
+    n_hops : int
+        Number of upstream hops to include (1, 2, or 3).
     """
-    snapshot_dir = _CACHE_DIR / "functional_network"
+    snapshot_dir = _snapshot_dir_for_hops(n_hops)
     snap_file = snapshot_dir / "body_ids.npy"
 
     if not force_rebuild and snap_file.exists():
-        print("[functional_selection] Loading cached network snapshot...")
-        return load_network_snapshot(snapshot_dir)
+        print(f"[functional_selection] Loading cached network snapshot "
+              f"({n_hops} hop(s)) from {snapshot_dir.name}...")
+        return load_network_snapshot(snapshot_dir, n_hops=n_hops)
 
-    result = select_locomotor_network(motor_top_n, premotor_top_n)
+    result = select_locomotor_network(motor_top_n, premotor_top_n, n_hops=n_hops)
     body_ids, meta_df, motor_leg_map, sources, targets, weights = result
     save_network_snapshot(body_ids, meta_df, motor_leg_map, sources, targets, weights,
                           output_dir=snapshot_dir)
