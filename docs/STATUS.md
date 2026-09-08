@@ -1,14 +1,41 @@
 # Project Status
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
 ## Active
 
 **Sensorimotor babbling** — let the body teach the network which connections move it, before
-any reward. Three levels: **L1 motor neuron (active)** → L2 interneuron/CPG → L3 descending
-command. L1 first because its failure is the only interpretable one.
+any reward. Three levels: L1 motor neuron → L2 interneuron/CPG → **L3 descending command
+(now active)**.
 
-**Child 0 is complete. The loop conducts — but not in a form Level 1 can use.**
+**Direction change 2026-08-19: L1 is closed, L2 is skipped, we go to the full loop.** The ladder
+assumed the shortest loop is the easiest. It is the hardest — every L1 obstacle was a consequence
+of being *small* (single synapses cannot fire cells; single-muscle drive recruits too few
+afferents; the return relay is wired onto 72% of motor neurons). The broadcast fan-out that
+**disqualified** L1 is **correct semantics** for a whole-body command.
+
+And the blocker we assumed was there is not. "The brain is not in our dataset"
+(`cb_intrinsic` = 4 neurons) is true but irrelevant — the loop closes inside the VNC:
+
+| return path | convergence | summed PSP | clears 20 mV? |
+|-------------|-------------|-----------|---------------|
+| L1: afferent → relay | up to 16 | max **15.56 mV** | **never** |
+| L3: ascending → DN | median 33, max 321 | **median 28.0 mV** | **841 of 1,305 DNs** |
+
+65,788 ascending→descending synapses reach all 1,305 DNs. `DNa02` (the known walking command)
+receives 58-59 ascending neurons delivering ~68-70 mV — 3.4× threshold.
+
+**The bottleneck moved to outbound.** DNa02 is only 2 cells: its 1-hop targets receive median
+0.83 / max 4.32 mV, so **0 of 918 reach threshold on one volley**. But DNa02 → X → LF motor
+reaches **64 of 64** LF MNs (median 16.9, max 115.7 mV, 30 ≥ 20). So hop 2 and the return are
+strong; hop 1 is weak. Likely fix is DN **co-activation** — the same multi-source correction that
+rescued L1, one level up.
+
+→ **[Idea: full loop / descending command](ideas/2026-08-19-full-loop-descending-command.md)**
+
+### L1 outcome (closed)
+
+**Child 0 complete. The loop conducts — but not in a form Level 1 can use.**
 
 **It closes with multi-joint drive.** Three muscles spanning coxa + trochanter + tibia fire all
 41 afferents and wake **7 neurons presynaptic to in-scope LF motor neurons**. Single-muscle
@@ -162,90 +189,43 @@ requirement. This is why 4.63 mV, and why the fix is breadth rather than drive.
 
 ## Next
 
-**The decision point: does Level 1 continue, or do we move to Level 2?**
+**Level 3 — the full descending-command loop.** Decision made 2026-08-19; rationale and measured
+connectome figures in [the idea doc](ideas/2026-08-19-full-loop-descending-command.md).
 
-Level 1's conduction question is answered. Its scientific question — *which motor neuron
-controls which joint* — is not answerable at this level, because closure needs multi-joint
-movement and the relays that carry it are wired onto 41-72% of motor neurons (anatomy, not a
-measured signal — the discriminability test below is what would settle it).
+**1. Outbound exit gate (the L3 analogue of Child 0c).** Stimulate `DNa02` and measure whether LF
+motor neurons fire. Hop 1 is the weak link — DNa02's 918 targets get max 4.32 mV against a 20 mV
+threshold, so **0 reach it on a single volley**. Three candidate resolutions, and distinguishing
+them *is* the experiment:
+   - temporal summation (bounded at ×5.52 by refractory → 4.32 mV becomes ~23.8 mV, barely viable)
+   - background operating point (the L1 lesson — must be set *before* the first measurement)
+   - **DN co-activation** — real walking recruits many DNs, not DNa02 alone. This is the
+     biologically faithful option and mirrors L1's multi-muscle correction exactly.
 
-**0. DONE — and it falsified its own premise.** The decoder defect was real: `max_rate ~ 200 Hz`
-was unsourced, unreachable and *divides* activation, making it **3.0x too low at 50 Hz** and
-5.7x at 30 Hz; and the decoder had no slow/intermediate/fast classes at all. Both fixed
-(per-class force per spike from Azevedo et al. 2020, per-class rate ceilings, `baseline_hz = 15`
-retired). The loop now closes under genuinely biological drive: **slow MNs tonic at 30 Hz plus
-fast MNs firing 1 spike, closure 35.9 ms**, 12/12 conditions, and at <=80 Hz the leg moves
-**0.99x** as far as it did at 200 Hz.
+**2. Full loop.** DN → motor → muscle → joint → afferent → ascending → back to the originating DN.
+Per-stage latency, frozen-physics control at every step.
 
-**But "the loop needs 200 Hz" was never true.** The *legacy* decode also closes at **20 Hz**
-given a 200 ms burst. Drive was pinned at 200 Hz and rate never swept — which the previous entry
-stated in its own Not Verified section. So the 200 Hz was a property of the protocol we chose,
-not a requirement the loop imposed. **Third premise on this project to dissolve on measurement,
-and ours again** — this time a never-swept parameter misread as a requirement rather than a
-constant misread as a finding.
+**3. Plasticity last.** Child 2's problems are unresolved and should not gate conduction: no STDP
+depression term, no unmodulated two-factor mode, and no control set disjoint from the closing
+pathways.
 
-**A second bottleneck was found, and it is not force.** The afferent→closure lag floors at
-**28.6 ms** in all 27 closing conditions under either decode, and force gain compresses only the
-mechanical half (51.2 → 6.6 ms drive-to-first-afferent). The prediction that latency would
-*drop with force* is falsified.
-→ **[Lab: motor force classes](lab/2026-08-18-motor-force-classes.md)** ·
-[Idea: motor force-per-spike gradient](ideas/2026-08-18-motor-force-gradient.md)
+**The specificity question does not go away by moving up a level.** With 65,788 ascending→DN
+synapses the return may be as broadcast as L1's was — it just changes scale. Worth asking early
+whether the loop returns to the *originating* DN or merely to *some* DN.
 
-> **CORRECTION (2026-08-18): "~35 ms is a synaptic floor" is wrong, and it is our own choice
-> again — the fifth.** All 27 of those conditions ran with `drive` zeroed for every neuron
-> outside the driven motor pool, so relay interneurons sat at exactly `V_rest = −70 mV` and had
-> to be pushed the full 20 mV by the afferent volley alone. No VNC interneuron is in that state,
-> and `create_background_drive` has existed since Epic 1 — **the loop-closure sweeps were the
-> outlier in having no background at all.**
->
-> Giving the relays a sub-threshold operating point takes the lag from **+28.8 ms to +5.8 ms**
-> (closure 35.4 → **12.4 ms**), which is **inside the published 3-6 ms band** our model
-> previously missed by 5×. The frozen-physics control is **silent at every usable level** — 0
-> closers, 0 afferent spikes, 0 downstream neurons — and the result replicates on a second drive
-> protocol (slow30+fast1: 35.9 → 12.5 ms).
->
-> **So "the return path is sub-threshold / too thin to conduct" is weakened.** The 15.56-vs-20 mV
-> arithmetic is right about one volley; the inference that ~26 ms of integration is *structural*
-> is not. It was a property of the operating point we never set.
->
-> Usable window: **0-125 pA constant (0-12.5 mV idling), 0-11 Hz Poisson.** Two ceilings, both
-> measured: at **poisson 20 Hz** the frozen network fires 1,952 of 1,980 possible closers
-> spontaneously (and 22 Hz — `create_background_drive`'s own default — is *above* this); and from
-> **130 pA** the recurrent network ignites the driven pool itself (34 → 351 Hz), so those rows are
-> a different motor protocol, not a faster return path. Without that second check the headline
-> would have read +0.9 ms.
->
-> **Unaffected:** the broadcast (`IN21A004` → 46/64 LF MNs), the inhibitory return, the
-> multi-joint requirement, the clean frozen control. Level 1's specificity problem is if anything
-> slightly worse — 125 closers carry less origin information than 6.
-> → **[Lab: the relays' operating point](lab/2026-08-18-relay-operating-point.md)**
+### Carried-over debt
 
-**1. The measurement that would settle Level 1 (cheap, one run):** does the return path
-*discriminate between origins* at all? Drive muscle set A vs set B and ask whether the closing
-relays differ. If they do not, Child 2 has no measurable contrast and Level 1 is done. **This is
-now the only open Level 1 question** — conduction, minimum rate and force are all measured.
-
-**2. Every pre-2026-08-18 latency and behaviour number used the legacy decode.** The force model
-is now the default for `functional_training` too, so training/STDP results and the Epic 5
-benchmarks were produced under a decode 3-6x too weak at physiological rates. Whether that
-changes any of them is **unmeasured**. The class assignment is also an **assumption** (size rank
-+ Azevedo's pool proportions); `size` spans only 2.1x within the Ti flexor pool against a 1000x
-force ratio, and Azevedo's Gal4-identified cells have no join key to MANC types.
-
-**3. Child 2 should not run as written.** It needs (a) a control set genuinely disjoint from the
-closing pathways — which may not exist, given the broadcast; (b) a decision about strengthening
-an **inhibitory** arc; (c) an STDP depression term, which we still do not have.
-
-**4. Level 2 is the better target.** Interneuron origins sit in far higher-convergence
-positions, and "which interneuron *pattern* produces which movement" is a question a broadcast
-return path can answer — it asks about patterns, not individual cells.
-
-**Housekeeping:** apply 0b's +2-9% gain correction for in-network inhibition; regenerate the
-retired scale table indexed by convergent pool size; add an unmodulated two-factor STDP mode.
-
-**Nothing is committed.** Seven source files across 0a/0b/0c plus the multi-muscle follow-up,
-including the shared learning path (`training.py`, `learning.py`) which affects existing
-reward-modulated training, not just babbling. Worth a review pass before this grows further.
+- **Prior training/benchmark numbers used a decode 3-6× too weak.** `force_model` is now on by
+  default in `MuscleDecoder`; whether Epic 4/5/6 conclusions move is **unmeasured**. Recorded in
+  commit `1abf33f`.
+- **`create_background_drive` defaults to 22 Hz — above the spontaneity ceiling** we measured
+  (98.6% of "closers" fire with the leg frozen). The existing training harness may be running in
+  a spontaneously-active regime.
+- **The unsigned position channel** — flexion +0.778 and extension −0.769 rad both give exactly
+  152 Hz. Was acceptable for L1; still unfixed.
+- **The L1 epic file is stale** — still specifies "~4-neuron pools at ~80 Hz" and "within 20 ms"
+  for Child 1, both retired.
+- Untracked and deliberately left alone: `.claude/skills/`, `scripts/`, `docs/process/`,
+  `uv.lock`, `demo-task*.md`.
 
 ## Documentation
 

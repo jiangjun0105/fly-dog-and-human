@@ -51,6 +51,7 @@ Proposed  →  Exploring  →  Adopted / Rejected
 
 ## Current Ideas
 
+- [2026-08-19-full-loop-descending-command.md](2026-08-19-full-loop-descending-command.md) — Skip Level 2, test the full descending-command loop: the ascending->DN return path is strong where Level 1's was not (Status: Proposed)
 - [2026-08-18-motor-force-gradient.md](2026-08-18-motor-force-gradient.md) — Slow/intermediate/fast force-per-spike classes: the decode really was ~3× too weak, but the 200 Hz it was meant to explain was never required (Status: Implemented — partially confirmed, premise falsified)
 - [2026-08-17-sensorimotor-babbling.md](2026-08-17-sensorimotor-babbling.md) — Let the body teach the network which connections move it, before any reward (Status: Exploring)
 - [2026-08-15-functional-neuron-selection.md](2026-08-15-functional-neuron-selection.md) — Trace from motor neurons to find the real locomotor circuit (Status: Exploring)
