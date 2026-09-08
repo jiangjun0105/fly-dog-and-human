@@ -264,28 +264,67 @@ requirement. This is why 4.63 mV, and why the fix is breadth rather than drive.
 
 ## Next
 
-**Level 3 — the full descending-command loop.** Decision made 2026-08-19; rationale and measured
-connectome figures in [the idea doc](ideas/2026-08-19-full-loop-descending-command.md).
+**Level 3 — the full descending-command loop.** Rationale in
+[the idea doc](ideas/2026-08-19-full-loop-descending-command.md).
 
-**1. Outbound exit gate (the L3 analogue of Child 0c).** Stimulate `DNa02` and measure whether LF
-motor neurons fire. Hop 1 is the weak link — DNa02's 918 targets get max 4.32 mV against a 20 mV
-threshold, so **0 reach it on a single volley**. Three candidate resolutions, and distinguishing
-them *is* the experiment:
-   - temporal summation (bounded at ×5.52 by refractory → 4.32 mV becomes ~23.8 mV, barely viable)
-   - background operating point (the L1 lesson — must be set *before* the first measurement)
-   - **DN co-activation** — real walking recruits many DNs, not DNa02 alone. This is the
-     biologically faithful option and mirrors L1's multi-muscle correction exactly.
+**1. Outbound exit gate — DONE, PASSED.** A descending command fires up to **50 of 52** in-scope LF
+motor neurons, DN → relay → MN in **1.6 ms**. No single mechanism suffices (all three minimal give
+0/52); **any two do**, and only one pairing is physiological:
 
-**2. Full loop.** DN → motor → muscle → joint → afferent → ascending → back to the originating DN.
-Per-stage latency, frozen-physics control at every step.
+| resolution | result |
+|---|---|
+| any one alone | **0/52** |
+| summation + background | 49/52 |
+| summation + co-activation | 39/52 |
+| **background + co-activation** | **50/52** |
 
-**3. Plasticity last.** Child 2's problems are unresolved and should not gate conduction: no STDP
-depression term, no unmodulated two-factor mode, and no control set disjoint from the closing
-pathways.
+Summation alone needs 500 Hz — the LIF refractory ceiling, 3.3× above any recorded fly rate. So the
+biologically available route is **co-activation into an already-active network**, exactly as
+predicted, and the same multi-source correction that rescued L1 one level down.
 
-**The specificity question does not go away by moving up a level.** With 65,788 ascending→DN
-synapses the return may be as broadcast as L1's was — it just changes scale. Worth asking early
-whether the loop returns to the *originating* DN or merely to *some* DN.
+Two findings that matter more than the pass:
+- **`DNa02` does not conduct at any physiological rate** (0/52 at 50 Hz, every background level);
+  only at 500 Hz. Its two cells are not equivalent — 523769 (L) has 12 direct motor synapses and
+  reaches 52/52 at two hops; 10360 (R) has none. **DNa02 has been our default "walk" stimulus for
+  every prior training run.** Likely a steering command asked to initiate from silence.
+- **The outbound path is a broadcast too** — conducting conditions fire **96%** of the motor pool,
+  Jaccard overlap between different DN sets **up to 1.000** (identical motor output from different
+  commands).
+
+→ **[Lab: L3 outbound exit gate](lab/2026-08-19-l3-outbound-exit-gate.md)**
+
+**2. THE decision point — does this connectome discriminate commands at all?**
+
+This is now the central question, not a caveat, because the same result appeared at both levels:
+
+| level | specificity finding |
+|-------|--------------------|
+| L1 (return) | one relay reaches 72% of LF motor neurons |
+| L3 (outbound) | 96% of the motor pool fires; overlap up to **1.000** |
+| structure | 36% of inputs to LF motor neurons also drive other legs |
+
+If distinct commands cannot produce distinct motor patterns, **the babbling premise fails at every
+level** — there is nothing for body-mediated correlation to teach. Answerable from the connectome
+plus a spiking test, no new physics: drive DN set A vs set B and measure whether the motor output
+differs beyond chance.
+
+**Run this before building the full-loop experiment.** A full loop that cannot distinguish its own
+commands would not be interpretable.
+
+**3. Full loop (gated on 2).** DN → motor → muscle → joint → afferent → ascending → back to the
+*originating* DN. Per-stage latency, frozen-physics control at every step. Note the return may be
+as broadcast as the outbound half — 65,788 ascending→DN synapses reach all 1,305 DNs.
+
+**4. Plasticity last.** Child 2's problems are unresolved and must not gate conduction: no STDP
+depression term, no unmodulated two-factor mode, no control set disjoint from the closing pathways.
+
+### Settled and not to be re-litigated
+
+- **Sign policy is not load-bearing for L1.** All three `unclear` policies (0 / +1 / −1) fire the
+  *same 7* downstream neurons, +0/−0, verified by an independent re-run. The closing path contains
+  no `unclear` cell. Keep the current policy; if revisited, split `unclear` by evidence (276 of
+  2,952 carry a specific `predictedNt`).
+- **Timing is not a barrier.** 35-49 ms against a **1000 ms** eligibility trace.
 
 ### Carried-over debt
 
