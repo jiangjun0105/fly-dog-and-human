@@ -63,25 +63,44 @@ We have used `DNa02` throughout the project as "the known walking command," and 
 starting point. But ranked by summed outbound PSP onto interneurons that reach LF motor neurons,
 **DNa02's two cells rank 537th and 66th of 1,279 DNs.** The strongest are:
 
-| DN | bodyId | summed PSP onto LF-reaching relays | soma |
-|----|--------|-----------------------------------|------|
-| DNg34 | 10295 | 486.3 mV | L |
-| DNg74_a | 10131 | 480.3 mV | R |
-| DNge149 | 11466 | 474.6 mV | M |
-| DNg100 | 10056 | 425.2 mV | R |
-| DNd03 | 11486 | 423.0 mV | L |
-| DNd02 | 11160 | 350.5 mV | L |
+> **CORRECTED 2026-08-19 — the original table here was wrong and is replaced.** It ranked DNs by
+> `log1p(synapse_count) * 0.6`, omitting the `sign` and `confidence` factors the live formula
+> applies (`network.py:447`). That is sign-blind, so it ranked *inhibitory* and *electrically
+> silent* neurons as the strongest drivers. Of the five originally listed: DNg74_a scored −212.7
+> (rank 1279 of 1279, i.e. the strongest **suppressor**), DNd03 −108.9, DNg108 −178.2, while DNg34
+> and DNge149 both score **exactly 0.0** — unclear/modulatory neurotransmitter means `sign = 0`
+> and they transmit nothing in our model. Do not use the old list.
+
+Ranked with the **live formula** (`log1p(count) * sign * confidence * inh_attenuation * scale`),
+summed onto interneurons that reach LF motor neurons:
+
+| DN | bodyId | summed PSP (signed) | note |
+|----|--------|--------------------|------|
+| DNg100 | 10056 | **+406.3 mV** | strongest excitatory driver |
+| pIP1 | 10030 | +296.3 | |
+| DNg37 | 10506 | +294.6 | |
+| DNg101 | 11527 | +283.9 | |
+| DNge073 | 11737 | +279.7 | |
+| aSP22 | 10090 | +278.8 | |
+
+**Verify these too.** They come from my reimplementation of the formula, not from the code path
+itself — recompute inside the harness where the weights are actually built.
 
 So there is a real tension to resolve rather than paper over: **DNa02 is the behaviourally
 identified walking command, but anatomically it is a weak driver of front-leg motor neurons.**
 
 Report both. Test DNa02 because it is the biologically meaningful command, *and* test a strong-DN
-set because it establishes whether the outbound path can conduct at all. If DNa02 fails where
-DNg34 succeeds, that is an interesting result about our model, the connectome, or the assumption
-that DNa02 drives front legs — say which you think it is, and why.
+set (from the corrected table) because it establishes whether the outbound path can conduct at all.
+If DNa02 fails where DNg100 succeeds, that is an interesting result about our model, the connectome,
+or the assumption that DNa02 drives front legs — say which you think it is, and why.
 
-(These PSP figures come from the weight formula in a `network.py` comment, so treat them as
-order-of-magnitude and **recompute from the live code path.**)
+Also worth checking: DNa02's own 537th/66th ranking was computed with the same flawed shortcut, so
+**recompute DNa02's rank under the live formula too.** It may be better or worse than stated.
+
+**Lesson worth carrying:** the first version of this ranking was computed from the formula as
+written in a `network.py` *comment* rather than the code, and dropping `sign`/`confidence` inverted
+it. Connectome adjacency is not drive — a strong anatomical connection can be inhibitory or, if the
+neurotransmitter prediction is unclear, electrically silent (`sign = 0`). Always carry sign.
 
 ## Constraints
 
