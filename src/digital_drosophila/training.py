@@ -65,6 +65,12 @@ class TrainingHarness:
         inactive and subject to decay.
     checkpoint_interval : int
         Save weight checkpoint every N episodes.
+    delay_params : dict, optional
+        Per-synapse transmission delay overrides (``min_ms``, ``max_ms``,
+        ``seed``). Defaults to ``network.DEFAULT_SYNAPTIC_DELAY`` (0.8-1.5 ms).
+    w_max : dict or float, optional
+        Soft-bound ceiling on ``|w|`` in mV; defaults to
+        ``network.DEFAULT_W_MAX_MV``.
     """
 
     def __init__(
@@ -86,6 +92,8 @@ class TrainingHarness:
         topology="biological",
         random_seed=42,
         backend="cpu",
+        delay_params=None,
+        w_max=None,
     ):
         self.n_episodes = n_episodes
         self.episode_length_s = episode_length_s
@@ -103,6 +111,8 @@ class TrainingHarness:
         self.checkpoint_interval = checkpoint_interval
         self.topology = topology
         self.random_seed = random_seed
+        self.delay_params = delay_params
+        self.w_max = w_max
         self._backend_type = backend
 
         # Set env vars before importing heavy dependencies
@@ -129,6 +139,7 @@ class TrainingHarness:
             load_sample_data,
             create_poisson_drive,
             create_background_drive,
+            assign_synaptic_delays,
             DEFAULT_LIF_PARAMS,
         )
         from .constants import NT_SIGN_MAP
@@ -259,6 +270,9 @@ class TrainingHarness:
             weights_raw[inh_mask] = inh_vals
 
         S.w = weights_raw * brian_mV
+
+        # Per-synapse chemical transmission delay (0.8-1.5 ms by default).
+        self._synapse_delays_ms = assign_synaptic_delays(S, self.delay_params)
 
         self._S = S
         self._sources = sources
@@ -396,8 +410,10 @@ class TrainingHarness:
             coupling_dt_ms=self.coupling_dt_ms,
             tau_stdp_ms=self.tau_stdp_ms,
             tau_eligibility_ms=self.tau_eligibility_s * 1000.0,
+            delay_params=self.delay_params,
         )
         self._gpu_backend.build()
+        self._synapse_delays_ms = self._gpu_backend.synapse_delays_ms
         print("PyGeNN backend ready.")
 
         # --- FlyGym body (same as CPU path) ---
@@ -644,6 +660,24 @@ class TrainingHarness:
         # Reward = forward distance in mm
         return float(displacement[0])
 
+    def _apply_weight_update(self, dw):
+        """Apply a weight change with soft-bounded potentiation + Dale's principle.
+
+        Potentiation is scaled by ``(1 - |w| / w_max)`` so growth saturates
+        asymptotically rather than being clipped (a clip would pin a whole
+        population at exactly ``w_max`` and erase graded weight differences).
+        ``w_max`` bounds magnitude, so inhibitory weights saturate at
+        ``-w_max``; see ``network.apply_bounded_update``.
+        """
+        from .network import apply_bounded_update
+
+        return apply_bounded_update(
+            self._current_weights,
+            dw,
+            self._sign_vector[self._sources],
+            w_max=self.w_max,
+        )
+
     def _update_weights(self, reward, rewards_history):
         """Apply reward-modulated weight update using eligibility traces."""
         # Compute dopamine signal (reward prediction error)
@@ -663,21 +697,8 @@ class TrainingHarness:
         # Compute weight deltas
         dw = self.learning_rate * eligibility * dopamine
 
-        # Apply update to current weights
-        self._current_weights = self._current_weights + dw
-
-        # Enforce sign constraint (Dale's principle)
-        excitatory_mask = self._sign_vector[self._sources] > 0
-        inhibitory_mask = self._sign_vector[self._sources] < 0
-
-        # Excitatory weights must stay >= 0
-        self._current_weights[excitatory_mask] = np.maximum(
-            self._current_weights[excitatory_mask], 0.0
-        )
-        # Inhibitory weights must stay <= 0
-        self._current_weights[inhibitory_mask] = np.minimum(
-            self._current_weights[inhibitory_mask], 0.0
-        )
+        # Apply update: soft-bounded potentiation + Dale's principle
+        self._current_weights = self._apply_weight_update(dw)
 
         # Return stats
         return {
@@ -746,20 +767,12 @@ class TrainingHarness:
         # Identify inactive synapses (low eligibility)
         inactive_mask = np.abs(eligibility) < self.eligibility_decay_threshold
 
-        # Apply decay only to inactive synapses
-        decay_factor = 1.0 - self.lambda_decay
-        self._current_weights[inactive_mask] *= decay_factor
-
-        # Enforce sign constraint after decay (decay toward zero, so this
-        # should already be satisfied, but enforce for safety)
-        excitatory_mask = self._sign_vector[self._sources] > 0
-        inhibitory_mask = self._sign_vector[self._sources] < 0
-        self._current_weights[excitatory_mask] = np.maximum(
-            self._current_weights[excitatory_mask], 0.0
-        )
-        self._current_weights[inhibitory_mask] = np.minimum(
-            self._current_weights[inhibitory_mask], 0.0
-        )
+        # Apply decay only to inactive synapses. Decay shrinks |w| towards 0,
+        # so it is pure depression — the soft bound does not apply, only the
+        # sign guarantee.
+        dw = np.zeros_like(self._current_weights)
+        dw[inactive_mask] = -self.lambda_decay * self._current_weights[inactive_mask]
+        self._current_weights = self._apply_weight_update(dw)
 
         n_decayed = int(np.sum(inactive_mask))
         n_total = len(self._current_weights)
@@ -1063,6 +1076,7 @@ class TrainedController:
             load_sample_data,
             create_poisson_drive,
             create_background_drive,
+            assign_synaptic_delays,
             DEFAULT_LIF_PARAMS,
         )
         from .constants import NT_SIGN_MAP
@@ -1120,6 +1134,7 @@ class TrainedController:
         sources, targets = adj.nonzero()
         S.connect(i=sources, j=targets)
         S.w = self._trained_weights * brian_mV
+        assign_synaptic_delays(S, getattr(self, "delay_params", None))
 
         # Input drives
         PG, S_input, _ = create_poisson_drive(

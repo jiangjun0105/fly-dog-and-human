@@ -53,7 +53,16 @@ def _create_adaptive_lif_model():
 
 
 def _create_stdp_eligibility_model():
-    """Create a weight update model with STDP eligibility traces."""
+    """Create a weight update model with STDP eligibility traces.
+
+    ``dSteps`` is the per-synapse chemical transmission delay in timesteps.
+    ``addToPostDelay`` routes the PSP through GeNN's dendritic delay buffer so
+    the postsynaptic effect lands ``dSteps`` timesteps later, matching Brian2's
+    per-synapse ``S.delay``. Note the STDP traces (``Apre``/``Apost``) are
+    updated at spike time, not at delivery time — same as the Brian2 path, where
+    ``delay`` shifts ``v_post += w`` but the trace updates in ``on_pre`` fire
+    when the presynaptic spike arrives at the synapse.
+    """
     from pygenn import create_weight_update_model
 
     return create_weight_update_model(
@@ -64,6 +73,7 @@ def _create_stdp_eligibility_model():
             ("Apre", "scalar"),
             ("Apost", "scalar"),
             ("eligibility", "scalar"),
+            ("dSteps", "uint16_t"),
         ],
         synapse_dynamics_code="""
         Apre -= Apre * dt / tauSTDP;
@@ -73,7 +83,7 @@ def _create_stdp_eligibility_model():
         pre_spike_syn_code="""
         Apre += 1.0;
         eligibility += Apost;
-        addToPost(g);
+        addToPostDelay(g, dSteps);
         """,
         post_spike_syn_code="""
         Apost += 1.0;
@@ -111,6 +121,11 @@ class PyGeNNBackend:
         STDP trace time constant in ms (default 20.0).
     tau_eligibility_ms : float
         Eligibility trace time constant in ms (default 1000.0).
+    delay_params : dict, optional
+        Per-synapse chemical transmission delay overrides (``min_ms``,
+        ``max_ms``, ``seed``). Defaults to ``network.DEFAULT_SYNAPTIC_DELAY``
+        (0.8-1.5 ms). Uses the same seeded draw as the Brian2 path, so with
+        identical connectivity ordering both backends get identical delays.
     """
 
     # Weight conversion: mV (Brian2 DeltaCurr) -> nA (GeNN ExpCurr)
@@ -131,6 +146,7 @@ class PyGeNNBackend:
         coupling_dt_ms=2.0,
         tau_stdp_ms=20.0,
         tau_eligibility_ms=1000.0,
+        delay_params=None,
     ):
         self._adj = adj
         self._initial_weights_mV = weights_mV.copy()
@@ -159,6 +175,23 @@ class PyGeNNBackend:
 
         self._n_synapses = len(self._sources)
         self._motor_set = set(motor_indices)
+
+        # ---- Per-synapse transmission delay ----
+        # Drawn with the same helper/seed the Brian2 path uses, then quantised
+        # to whole timesteps (the only resolution GeNN's dendritic delay buffer
+        # has) using Brian2's own rounding rule, so the two backends agree
+        # step-for-step. At dt = 0.1 ms the 0.8-1.5 ms range becomes 8-15 steps,
+        # so quantisation error is <= 0.05 ms — well below the 1-3 ms effect
+        # being modelled.
+        from .network import quantize_delays_to_steps, sample_synaptic_delays_ms
+
+        self._delay_params = delay_params
+        self._synapse_delays_ms = sample_synaptic_delays_ms(
+            self._n_synapses, delay_params
+        )
+        self._delay_steps = quantize_delays_to_steps(
+            self._synapse_delays_ms, self._dt_ms
+        ).astype(np.uint16)
 
         # Model state
         self._model = None
@@ -221,10 +254,14 @@ class PyGeNNBackend:
             pop, pop,
             init_weight_update(STDPEligibility,
                                {"tauSTDP": self._tau_stdp_ms, "tauElig": self._tau_eligibility_ms},
-                               {"g": weights_nA, "Apre": 0.0, "Apost": 0.0, "eligibility": 0.0}),
+                               {"g": weights_nA, "Apre": 0.0, "Apost": 0.0,
+                                "eligibility": 0.0, "dSteps": self._delay_steps}),
             init_postsynaptic("ExpCurr", {"tau": tau_syn}),
         )
         syn.set_sparse_connections(self._sources, self._targets)
+
+        # Size the dendritic delay ring buffer for the longest delay.
+        syn.max_dendritic_delay_timesteps = int(self._delay_steps.max()) + 1
 
         # ---- Build and load ----
         model.build()
@@ -388,6 +425,15 @@ class PyGeNNBackend:
     def dt_ms(self):
         """Simulation timestep in ms."""
         return self._dt_ms
+
+    @property
+    def synapse_delays_ms(self):
+        """Per-synapse transmission delay actually simulated, in ms.
+
+        This is the quantised value (``delay_steps * dt_ms``), not the raw
+        draw, so it is directly comparable with measured latencies.
+        """
+        return self._delay_steps.astype(float) * self._dt_ms
 
     @property
     def coupling_dt_ms(self):

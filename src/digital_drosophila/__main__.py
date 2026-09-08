@@ -9,6 +9,8 @@ Usage:
     python -m digital_drosophila loop motor_test
     python -m digital_drosophila loop closed_loop
     python -m digital_drosophila loop episode_demo
+    python -m digital_drosophila loop proprio_test [--side L|R] [--gain PA] [--steps 3000]
+    python -m digital_drosophila loop sensory_calibration [--steps 3000] [--drive-steps 500]
     python -m digital_drosophila learn stdp_basic [--episodes N]
     python -m digital_drosophila learn train [--episodes 50] [--episode-length 2.0] [--topology biological|random] [--backend cpu|gpu]
     python -m digital_drosophila learn train_gpu [--episodes 50] [--episode-length 2.0]
@@ -23,6 +25,10 @@ Usage:
     python -m digital_drosophila benchmark locomotion [--episodes 10] [--duration 5.0]
     python -m digital_drosophila benchmark chemotaxis [--episodes 10] [--duration 10.0]
     python -m digital_drosophila benchmark navigation [--episodes 5] [--duration 5.0]
+    python -m digital_drosophila check neural_model [--skip-gpu]
+    python -m digital_drosophila check body_wiring [--quick]
+    python -m digital_drosophila check multi_muscle [--quick]
+    python -m digital_drosophila check background [--quick]
 """
 
 import sys
@@ -41,10 +47,15 @@ def main():
             "  loop motor_test                           Run motor output adapter test\n"
             "  loop closed_loop                          Run closed-loop co-simulation\n"
             "  loop episode_demo                         Run episode-based harness demo\n"
+            "  loop proprio_test                         Demo the ProLN proprioceptive encoder\n"
+            "  loop sensory_calibration                  Calibrate sensory gains on real LIF neurons\n"
             "  learn stdp_basic [--episodes N]           Run STDP learning (default 10 episodes)\n"
             "  learn train [--episodes N] [--backend cpu|gpu]    Extended training with homeostasis\n"
             "  learn train_gpu [--episodes N]                    GPU-accelerated training (PyGeNN)\n"
-            "  benchmark <locomotion|chemotaxis|navigation>  Run benchmark suite"
+            "  benchmark <locomotion|chemotaxis|navigation>  Run benchmark suite\n"
+            "  check neural_model                        Verify synaptic delay + bounded STDP\n"
+            "  check body_wiring                         Muscles->physics->afferent conduction\n"
+            "  check multi_muscle                        Multi-joint drive + frozen-physics control"
         )
         sys.exit(1)
 
@@ -99,10 +110,64 @@ def main():
             from .loop import run_episode_demo
 
             run_episode_demo()
+        elif subcommand == "proprio_test":
+            from .proprioceptive_encoder import SETTLE_STEPS
+
+            side = None
+            gain_pa = None
+            steps = SETTLE_STEPS
+            for i, arg in enumerate(args[2:], start=2):
+                if arg == "--side" and i + 1 < len(args):
+                    side = args[i + 1]
+                    if side not in ("L", "R"):
+                        print(f"Invalid side: {side!r}. Choose 'L' or 'R'.")
+                        sys.exit(1)
+                elif arg == "--gain" and i + 1 < len(args):
+                    try:
+                        gain_pa = float(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid gain value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--steps" and i + 1 < len(args):
+                    try:
+                        steps = int(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid steps value: {args[i + 1]!r}")
+                        sys.exit(1)
+
+            from .proprioceptive_encoder import run_proprioceptive_demo
+
+            run_proprioceptive_demo(side=side, gain_pa=gain_pa, steps=steps)
+        elif subcommand == "sensory_calibration":
+            from .proprioceptive_encoder import (
+                SETTLE_STEPS,
+                run_sensory_calibration,
+            )
+
+            steps = SETTLE_STEPS
+            drive_steps = 500
+            for i, arg in enumerate(args[2:], start=2):
+                if arg == "--steps" and i + 1 < len(args):
+                    try:
+                        steps = int(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid steps value: {args[i + 1]!r}")
+                        sys.exit(1)
+                elif arg == "--drive-steps" and i + 1 < len(args):
+                    try:
+                        drive_steps = int(args[i + 1])
+                    except ValueError:
+                        print(f"Invalid drive-steps value: {args[i + 1]!r}")
+                        sys.exit(1)
+
+            run_sensory_calibration(steps=steps, drive_steps=drive_steps)
         else:
             print(
                 "Usage: python -m digital_drosophila loop "
-                "<motor_test|closed_loop|episode_demo>"
+                "<motor_test|closed_loop|episode_demo|proprio_test"
+                "|sensory_calibration>\n"
+                "\n  proprio_test [--side L|R] [--gain PA] [--steps N]"
+                "\n  sensory_calibration [--steps N] [--drive-steps N]"
             )
             sys.exit(1)
 
@@ -220,9 +285,9 @@ def main():
                 elif arg == "--hops" and i + 1 < len(args):
                     try:
                         n_hops = int(args[i + 1])
-                        if n_hops < 1 or n_hops > 3:
+                        if n_hops < 1:
                             print(f"Invalid hops value: {args[i + 1]!r}. "
-                                  "Choose 1, 2, or 3.")
+                                  "Must be >= 1.")
                             sys.exit(1)
                     except ValueError:
                         print(f"Invalid hops value: {args[i + 1]!r}")
@@ -467,8 +532,48 @@ def main():
             )
             sys.exit(1)
 
+    elif command == "check":
+        subcommand = args[1] if len(args) > 1 else ""
+
+        if subcommand == "neural_model":
+            from .neural_model_checks import run_all_checks
+
+            skip_gpu = "--skip-gpu" in args
+            run_all_checks(skip_gpu=skip_gpu)
+        elif subcommand == "body_wiring":
+            from .body_wiring import run_all
+
+            run_all(quick="--quick" in args)
+        elif subcommand == "multi_muscle":
+            from .body_wiring import run_multi_muscle
+
+            run_multi_muscle(quick="--quick" in args)
+        elif subcommand == "background":
+            from .body_wiring import run_background
+
+            run_background(quick="--quick" in args)
+        else:
+            print(
+                "Usage: python -m digital_drosophila check "
+                "<neural_model|body_wiring|multi_muscle|background>\n"
+                "\nAvailable checks:\n"
+                "  neural_model   Verify synaptic delay + soft-bounded STDP\n"
+                "  body_wiring    Muscles drive physics; end-to-end conduction\n"
+                "                 [--quick] fewer sweep points\n"
+                "  multi_muscle   Multi-joint drive + frozen-physics control,\n"
+                "                 size-principle check, minimum conducting rate\n"
+                "                 (legacy vs per-class force decode), and the\n"
+                "                 class-specific protocol (slow tonic / fast spikes)\n"
+                "                 [--quick] 50 ms bursts only\n"
+                "  background     Relay operating point: does background drive\n"
+                "                 shrink the 28.6 ms synaptic floor, and does the\n"
+                "                 frozen-physics control stay silent when it does?\n"
+                "                 [--quick] fewer background levels"
+            )
+            sys.exit(1)
+
     else:
-        print(f"Unknown command: {command!r}. Choose from: simulate, body, loop, learn, demo, benchmark")
+        print(f"Unknown command: {command!r}. Choose from: simulate, body, loop, learn, demo, benchmark, check")
         sys.exit(1)
 
 

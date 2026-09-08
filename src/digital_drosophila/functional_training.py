@@ -68,6 +68,15 @@ class FunctionalTrainingHarness:
     continuous_update_interval : int
         For continuous reward mode: how many coupling steps between weight
         updates (default 50, i.e. every 100 ms at 2 ms/step).
+    delay_params : dict, optional
+        Per-synapse transmission delay overrides (``min_ms``, ``max_ms``,
+        ``seed``). Defaults to ``network.DEFAULT_SYNAPTIC_DELAY``
+        (0.8-1.5 ms). Pass ``{"min_ms": 0.0, "max_ms": 0.0}`` to reproduce
+        the old instantaneous-transmission behaviour.
+    w_max : dict or float, optional
+        Soft-bound ceiling on ``|w|`` in mV. Defaults to
+        ``network.DEFAULT_W_MAX_MV``, derived from the full VNC weight
+        distribution.
     """
 
     def __init__(
@@ -93,6 +102,8 @@ class FunctionalTrainingHarness:
         backend="gpu",
         reward_mode="episodic",
         continuous_update_interval=50,
+        delay_params=None,
+        w_max=None,
     ):
         self.n_episodes = n_episodes
         self.episode_length_s = episode_length_s
@@ -118,6 +129,8 @@ class FunctionalTrainingHarness:
             )
         self.reward_mode = reward_mode
         self.continuous_update_interval = continuous_update_interval
+        self.delay_params = delay_params
+        self.w_max = w_max
 
         # Resolve backend — fall back to cpu if GPU unavailable
         if backend == "gpu":
@@ -147,15 +160,15 @@ class FunctionalTrainingHarness:
             Hz as brian_Hz, mV as brian_mV, ms as brian_ms,
             second as brian_second, Mohm as brian_Mohm, pA,
         )
-        from .network import DEFAULT_LIF_PARAMS
+        from .network import DEFAULT_LIF_PARAMS, assign_synaptic_delays
         from .constants import NT_SIGN_MAP
         from .locomotion import build_simulation, settle_simulation
         from .sensory_encoder import SensoryEncoder
         from .motor_adapter import SpikeRateDecoder
         from .functional_selection import (
             get_or_build_network, get_or_build_full_vnc_network,
-            build_motor_actuator_map,
         )
+        from .muscle_decoder import MuscleDecoder
 
         # ------------------------------------------------------------------
         # Load functional network
@@ -317,9 +330,15 @@ class FunctionalTrainingHarness:
         )
         S.w = weights_raw * brian_mV
 
+        # Per-synapse chemical transmission delay (0.8-1.5 ms by default).
+        delays_ms = assign_synaptic_delays(S, self.delay_params)
+        print(f"[build] Synaptic delay: mean {delays_ms.mean():.3f} ms "
+              f"(range {delays_ms.min():.3f}-{delays_ms.max():.3f} ms)")
+
         self._S = S
         self._sources = sources_coo
         self._targets = targets_coo
+        self._synapse_delays_ms = delays_ms
         self._initial_weights = weights_raw.copy()
 
         # ------------------------------------------------------------------
@@ -396,13 +415,14 @@ class FunctionalTrainingHarness:
             dt_ms=self.coupling_dt_ms,
         )
 
-        # Biological motor mapping: network_index -> list of actuator indices
-        self._motor_actuator_map = build_motor_actuator_map(
-            self._motor_leg_map, self._body_ids
+        # Connectome-driven motor decoder (type -> muscle -> DOF)
+        self._muscle_decoder = MuscleDecoder(
+            self._meta_df, self._body_ids, motor_gain=self.motor_gain
         )
-
-        print(f"[build] Motor actuator map: {len(self._motor_actuator_map)} neurons "
-              f"each driving up to 3 actuators")
+        coverage = self._muscle_decoder.leg_coverage()
+        print(f"[build] Muscle decoder: {len(self._muscle_decoder.assignments)} leg "
+              f"motor neurons, {int(coverage['n_dof_mapped'].sum())} DOF-mapped, "
+              f"{int(coverage['n_muscle_mapped'].sum())} muscle-mapped")
 
         print("[build] Done.")
 
@@ -416,8 +436,8 @@ class FunctionalTrainingHarness:
         from .motor_adapter import SpikeRateDecoder
         from .functional_selection import (
             get_or_build_network, get_or_build_full_vnc_network,
-            build_motor_actuator_map,
         )
+        from .muscle_decoder import MuscleDecoder
         from .gpu_backend import PyGeNNBackend
 
         # ------------------------------------------------------------------
@@ -537,8 +557,15 @@ class FunctionalTrainingHarness:
             coupling_dt_ms=self.coupling_dt_ms,
             tau_stdp_ms=self.tau_stdp_ms,
             tau_eligibility_ms=self.tau_eligibility_s * 1000.0,
+            delay_params=self.delay_params,
         )
         self._gpu_backend.build()
+        self._synapse_delays_ms = self._gpu_backend.synapse_delays_ms
+        print(f"[build_gpu] Synaptic delay: mean "
+              f"{self._synapse_delays_ms.mean():.3f} ms (range "
+              f"{self._synapse_delays_ms.min():.3f}-"
+              f"{self._synapse_delays_ms.max():.3f} ms, quantised to "
+              f"{self._gpu_backend.dt_ms} ms steps)")
         print("[build_gpu] PyGeNN backend ready.")
 
         # ------------------------------------------------------------------
@@ -577,21 +604,23 @@ class FunctionalTrainingHarness:
             dt_ms=self.coupling_dt_ms,
         )
 
-        # Biological motor mapping: network_index -> list of actuator indices
-        self._motor_actuator_map = build_motor_actuator_map(
-            self._motor_leg_map, self._body_ids
+        # Connectome-driven motor decoder (type -> muscle -> DOF)
+        self._muscle_decoder = MuscleDecoder(
+            self._meta_df, self._body_ids, motor_gain=self.motor_gain
         )
-
-        print(f"[build_gpu] Motor actuator map: {len(self._motor_actuator_map)} neurons "
-              f"each driving up to 3 actuators")
+        coverage = self._muscle_decoder.leg_coverage()
+        print(f"[build_gpu] Muscle decoder: {len(self._muscle_decoder.assignments)} leg "
+              f"motor neurons, {int(coverage['n_dof_mapped'].sum())} DOF-mapped, "
+              f"{int(coverage['n_muscle_mapped'].sum())} muscle-mapped")
         print("[build_gpu] Done.")
 
     def _decode_biological(self, rates_hz: dict[int, float]) -> np.ndarray:
-        """Convert motor neuron spike rates to actuator positions using biological mapping.
+        """Convert motor neuron spike rates to actuator positions.
 
-        Each motor neuron contributes to specific actuators on its leg.
-        Multiple motor neurons targeting the same actuator have their offsets
-        averaged.
+        Delegates to ``MuscleDecoder``, which maps each motor neuron onto the
+        DOF its annotated muscle actually moves and combines antagonist
+        populations with a size-principle weighted sum (see
+        docs/neuroscience/13-motor-neuron-muscle-mapping.md §4).
 
         Parameters
         ----------
@@ -603,28 +632,7 @@ class FunctionalTrainingHarness:
         action : ndarray (66,)
             Actuator position commands.
         """
-        action = self._neutral_ctrl.copy()
-        # Accumulate offsets per actuator
-        actuator_offsets = {}
-        actuator_counts = {}
-
-        baseline_hz = 15.0
-        amplitude = self.motor_gain
-
-        for net_idx, actuator_list in self._motor_actuator_map.items():
-            rate = rates_hz.get(net_idx, 0.0)
-            offset = (rate - baseline_hz) / max(baseline_hz, 1.0) * amplitude
-            offset = float(np.clip(offset, -amplitude, amplitude))
-            for act_idx in actuator_list:
-                actuator_offsets[act_idx] = actuator_offsets.get(act_idx, 0.0) + offset
-                actuator_counts[act_idx] = actuator_counts.get(act_idx, 0) + 1
-
-        # Average contributions and apply
-        for act_idx, total_offset in actuator_offsets.items():
-            count = actuator_counts[act_idx]
-            action[act_idx] += total_offset / count
-
-        return action
+        return self._muscle_decoder.decode(rates_hz, self._neutral_ctrl)
 
     def _reset_episode(self):
         """Reset network and body for a new episode."""
@@ -879,17 +887,7 @@ class FunctionalTrainingHarness:
 
             # 7. Batch weight update every continuous_update_interval steps
             if steps_since_update >= self.continuous_update_interval:
-                self._current_weights = self._current_weights + accumulated_dw
-
-                # Enforce Dale's principle
-                exc_mask = self._sign_vector[self._sources] > 0
-                inh_mask = self._sign_vector[self._sources] < 0
-                self._current_weights[exc_mask] = np.maximum(
-                    self._current_weights[exc_mask], 0.0
-                )
-                self._current_weights[inh_mask] = np.minimum(
-                    self._current_weights[inh_mask], 0.0
-                )
+                self._current_weights = self._apply_weight_update(accumulated_dw)
 
                 # Apply updated weights to GPU backend for next batch
                 # (convert mV -> nA as PyGeNN uses nA internally)
@@ -904,18 +902,43 @@ class FunctionalTrainingHarness:
 
         # Flush any remaining accumulated updates
         if steps_since_update > 0 and np.any(accumulated_dw != 0):
-            self._current_weights = self._current_weights + accumulated_dw
-            exc_mask = self._sign_vector[self._sources] > 0
-            inh_mask = self._sign_vector[self._sources] < 0
-            self._current_weights[exc_mask] = np.maximum(
-                self._current_weights[exc_mask], 0.0
-            )
-            self._current_weights[inh_mask] = np.minimum(
-                self._current_weights[inh_mask], 0.0
-            )
+            self._current_weights = self._apply_weight_update(accumulated_dw)
 
         # Store for reporting
         self._episode_total_displacement = total_displacement
+
+    def _apply_weight_update(self, dw) -> np.ndarray:
+        """Apply a weight change with soft-bounded potentiation + Dale's principle.
+
+        The single place weights are allowed to change. Potentiation is scaled by
+        ``(1 - |w| / w_max)`` so growth saturates asymptotically at ``w_max``
+        rather than being clipped there — a clip would pile a whole population of
+        synapses onto exactly ``w_max`` and erase the graded weight differences
+        that the babbling experiment measures. Depression stays additive and is
+        floored at zero, so sign is preserved.
+
+        ``w_max`` bounds *magnitude*, so inhibitory synapses (whose weights are
+        negative) saturate at ``-w_max`` rather than ``+w_max``; see
+        ``network.apply_bounded_update``.
+
+        Parameters
+        ----------
+        dw : ndarray
+            Proposed per-synapse weight change in mV.
+
+        Returns
+        -------
+        ndarray
+            The new weight vector.
+        """
+        from .network import apply_bounded_update
+
+        return apply_bounded_update(
+            self._current_weights,
+            dw,
+            self._sign_vector[self._sources],
+            w_max=self.w_max,
+        )
 
     def _compute_firing_rates(self) -> np.ndarray:
         if self._backend_type == "gpu":
@@ -949,17 +972,7 @@ class FunctionalTrainingHarness:
         else:
             eligibility = np.array(self._S.eligibility[:])
         dw = self.learning_rate * eligibility * dopamine
-        self._current_weights = self._current_weights + dw
-
-        # Enforce Dale's principle
-        exc_mask = self._sign_vector[self._sources] > 0
-        inh_mask = self._sign_vector[self._sources] < 0
-        self._current_weights[exc_mask] = np.maximum(
-            self._current_weights[exc_mask], 0.0
-        )
-        self._current_weights[inh_mask] = np.minimum(
-            self._current_weights[inh_mask], 0.0
-        )
+        self._current_weights = self._apply_weight_update(dw)
 
         return {
             "dopamine": dopamine,
@@ -968,7 +981,20 @@ class FunctionalTrainingHarness:
             "max_abs_dw": float(np.max(np.abs(dw))),
             "weight_mean": float(np.mean(self._current_weights)),
             "weight_std": float(np.std(self._current_weights)),
+            "weight_max_abs": float(np.max(np.abs(self._current_weights))),
+            "frac_above_90pct_wmax": float(self._frac_near_wmax()),
         }
+
+    def _frac_near_wmax(self) -> float:
+        """Fraction of synapses whose |w| exceeds 90% of their own ceiling.
+
+        A diagnostic for runaway potentiation: under soft-bounding this should
+        stay small, and no synapse should ever exceed 1.0.
+        """
+        from .network import synapse_w_max
+
+        ceiling = synapse_w_max(self._sign_vector[self._sources], self.w_max)
+        return float(np.mean(np.abs(self._current_weights) > 0.9 * ceiling))
 
     def _apply_homeostatic_plasticity(self, firing_rates: np.ndarray) -> dict:
         rate_deviation = firing_rates - self.target_rate
@@ -992,16 +1018,12 @@ class FunctionalTrainingHarness:
         else:
             eligibility = np.array(self._S.eligibility[:])
         inactive_mask = np.abs(eligibility) < self.eligibility_decay_threshold
-        self._current_weights[inactive_mask] *= (1.0 - self.lambda_decay)
 
-        exc_mask = self._sign_vector[self._sources] > 0
-        inh_mask = self._sign_vector[self._sources] < 0
-        self._current_weights[exc_mask] = np.maximum(
-            self._current_weights[exc_mask], 0.0
-        )
-        self._current_weights[inh_mask] = np.minimum(
-            self._current_weights[inh_mask], 0.0
-        )
+        # Decay shrinks |w| towards 0, so it is pure depression: no soft bound
+        # applies, only the sign guarantee.
+        dw = np.zeros_like(self._current_weights)
+        dw[inactive_mask] = -self.lambda_decay * self._current_weights[inactive_mask]
+        self._current_weights = self._apply_weight_update(dw)
 
         n_decayed = int(np.sum(inactive_mask))
         n_total = len(self._current_weights)
@@ -1232,13 +1254,18 @@ class FunctionalTrainedController:
     """
 
     # Maps neuron count -> n_hops for auto-detection
-    _NEURON_COUNT_TO_HOPS = {248: 1, 398: 2, 498: 3}
+    _NEURON_COUNT_TO_HOPS = {
+        248: 1, 398: 2, 498: 3, 548: 4, 598: 5,
+        648: 6, 698: 7, 748: 8, 798: 9, 848: 10,
+    }
 
-    def __init__(self, checkpoint_path, episode_length_s=5.0, n_hops=None):
+    def __init__(self, checkpoint_path, episode_length_s=5.0, n_hops=None,
+                 delay_params=None):
         import numpy as np
 
         self._checkpoint_path = Path(checkpoint_path)
         self._episode_length_s = episode_length_s
+        self._delay_params = delay_params
 
         ckpt = np.load(self._checkpoint_path, allow_pickle=True)
         self._trained_weights = ckpt["weights"]
@@ -1269,14 +1296,13 @@ class FunctionalTrainedController:
             Hz as brian_Hz, mV as brian_mV, ms as brian_ms,
             Mohm as brian_Mohm, pA,
         )
-        from .network import DEFAULT_LIF_PARAMS
+        from .network import DEFAULT_LIF_PARAMS, assign_synaptic_delays
         from .constants import NT_SIGN_MAP
         from .locomotion import build_simulation, settle_simulation
         from .sensory_encoder import SensoryEncoder
         from .motor_adapter import SpikeRateDecoder
-        from .functional_selection import (
-            load_network_snapshot, build_motor_actuator_map
-        )
+        from .functional_selection import load_network_snapshot
+        from .muscle_decoder import MuscleDecoder
 
         # Load network snapshot matching the training hop count
         (body_ids, meta_df, motor_leg_map,
@@ -1339,6 +1365,7 @@ class FunctionalTrainedController:
         S = Synapses(G, G, "w : volt", on_pre="v_post += w")
         S.connect(i=sources_coo, j=targets_coo)
         S.w = self._trained_weights * brian_mV
+        assign_synaptic_delays(S, self._delay_params)
 
         # Input drives
         if self._descending_indices:
@@ -1391,9 +1418,10 @@ class FunctionalTrainedController:
         self._decoder = SpikeRateDecoder(
             self._motor_neuron_indices, window_ms=50.0, dt_ms=self._coupling_dt_ms,
         )
-        self._motor_actuator_map = build_motor_actuator_map(motor_leg_map, body_ids)
-
         self._motor_gain = 0.3
+        self._muscle_decoder = MuscleDecoder(
+            meta_df, body_ids, motor_gain=self._motor_gain
+        )
         self._n_steps_total = int(
             self._episode_length_s * 1000 / self._coupling_dt_ms
         )
@@ -1404,25 +1432,7 @@ class FunctionalTrainedController:
         self._actions = []
 
     def _decode_biological(self, rates_hz):
-        action = self._neutral_ctrl.copy()
-        actuator_offsets = {}
-        actuator_counts = {}
-        baseline_hz = 15.0
-        amplitude = self._motor_gain
-
-        for net_idx, actuator_list in self._motor_actuator_map.items():
-            rate = rates_hz.get(net_idx, 0.0)
-            offset = float(np.clip(
-                (rate - baseline_hz) / max(baseline_hz, 1.0) * amplitude,
-                -amplitude, amplitude
-            ))
-            for act_idx in actuator_list:
-                actuator_offsets[act_idx] = actuator_offsets.get(act_idx, 0.0) + offset
-                actuator_counts[act_idx] = actuator_counts.get(act_idx, 0) + 1
-
-        for act_idx, total_offset in actuator_offsets.items():
-            action[act_idx] += total_offset / actuator_counts[act_idx]
-        return action
+        return self._muscle_decoder.decode(rates_hz, self._neutral_ctrl)
 
     def reset(self):
         import brian2

@@ -62,6 +62,7 @@ class LearningLoop:
         motor_gain=0.3,
         sensory_gain=500e-12,
         baseline_window=5,
+        delay_params=None,
     ):
         self.n_episodes = n_episodes
         self.episode_length_s = episode_length_s
@@ -72,6 +73,7 @@ class LearningLoop:
         self.motor_gain = motor_gain
         self.sensory_gain = sensory_gain
         self.baseline_window = baseline_window
+        self.delay_params = delay_params
 
         # Set env vars before importing heavy dependencies
         os.environ.setdefault("MUJOCO_GL", "egl")
@@ -95,6 +97,7 @@ class LearningLoop:
             create_neuron_group,
             create_poisson_drive,
             create_background_drive,
+            assign_synaptic_delays,
         )
         from .constants import NT_SIGN_MAP
         from .locomotion import build_simulation, settle_simulation
@@ -175,6 +178,9 @@ class LearningLoop:
             * scale
         )
         S.w = weights_raw * brian_mV
+
+        # Per-synapse chemical transmission delay (0.8-1.5 ms by default).
+        self._synapse_delays_ms = assign_synaptic_delays(S, self.delay_params)
 
         self._S = S
         self._sources = sources
@@ -354,20 +360,10 @@ class LearningLoop:
         # Compute weight deltas
         dw = self.learning_rate * eligibility * dopamine
 
-        # Apply update to current weights
-        self._current_weights = self._current_weights + dw
-
-        # Enforce sign constraint (Dale's principle)
-        excitatory_mask = self._sign_vector[self._sources] > 0
-        inhibitory_mask = self._sign_vector[self._sources] < 0
-
-        # Excitatory weights must stay >= 0
-        self._current_weights[excitatory_mask] = np.maximum(
-            self._current_weights[excitatory_mask], 0.0
-        )
-        # Inhibitory weights must stay <= 0
-        self._current_weights[inhibitory_mask] = np.minimum(
-            self._current_weights[inhibitory_mask], 0.0
+        # Apply update: soft-bounded potentiation + Dale's principle
+        from .network import apply_bounded_update
+        self._current_weights = apply_bounded_update(
+            self._current_weights, dw, self._sign_vector[self._sources],
         )
 
         # Return stats
