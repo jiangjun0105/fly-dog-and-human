@@ -294,6 +294,27 @@ Two findings that matter more than the pass:
 → **[Lab: L3 outbound exit gate](lab/2026-08-19-l3-outbound-exit-gate.md)**
 
 **2. THE decision point — does this connectome discriminate commands at all?**
+→ **[Issue: command discriminability](issues/2026-08-19-command-discriminability.md)** ·
+**[DN behaviour map](neuroscience/16-descending-neuron-behaviour-map.md)**
+
+**Command sets are now defined by documented behaviour, not synaptic strength.** A literature pass
+found that our strength-ranked set had included `pIP1` (courtship) at rank 2, and had missed
+`DNg97`/`oDN1` (forward walking) entirely. Verified in our own data: **`DNg100` IS `BDN2`**, the
+documented forward-walking command — and it was our top-ranked DN, so the anatomy found the right
+neuron without knowing what it did. Strength ranking is a good prior and a bad selector.
+
+**`DNa02` was being used wrong, and that is on us.** Turn velocity is set by the right–left
+*difference* in DNa02 activity — a see-saw. We drove both cells equally and bilaterally, commanding
+a turn in no direction with no forward drive, so 0/52 was the correct outcome for that stimulus. It
+biases an already-walking model; it does not start one. **This affects Epic 4/5/6, where DNa02 was
+the default "walk" stimulus applied bilaterally from rest.**
+
+**The literature also vindicates our co-activation result.** Population recordings (~100 DNs) show
+natural walking uses dozens of overlapping DNs in parallel; forcing 2 cells proves sufficiency, not
+mechanism. So "2 cells fail, 12 succeed" is a feature. That is the third time this project has been
+pushed from a single-source stimulus to a multi-source one (single muscle → 3 muscles; single
+synapse → convergence; DN pair → DN bundle).
+
 
 This is now the central question, not a caveat, because the same result appeared at both levels:
 
