@@ -311,3 +311,8 @@ whether the loop returns to the *originating* DN or merely to *some* DN.
 | `issues/` | Engineering specs (epic/issue definitions) |
 | `tasks/` | Implementation breakdown (dispatchable work) |
 | `neuroscience/` | Theory reference (connectome, LIF, learning strategies) |
+
+**Neuron census:** [`neuroscience/15-lf-leg-neuron-census.md`](neuroscience/15-lf-leg-neuron-census.md)
+— how many LF-leg neurons exist vs how many we model (**motor 52/64 = 81%, sensory 41/504 = 8%**),
+what is presynaptic to the motor pool (2,047 neurons, 36% of them multi-leg), and why only 7 fire
+in our experiments.
