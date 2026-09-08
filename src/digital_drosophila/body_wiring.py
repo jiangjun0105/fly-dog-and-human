@@ -150,7 +150,26 @@ DRIVE_PA_FOR_HZ: dict[int, float] = {
     120: 421.6,
     150: 523.0,
     200: 747.2,
+    # Added 2026-08-19 for the Level 3 temporal-summation arm, measured the same
+    # way (1 s isolated-LIF spike count, 25 pA grid).  These are ABOVE any recorded
+    # Drosophila rate and exist only to bound what temporal summation can do: with
+    # ``t_refract = 2 ms`` the LIF saturates at 500 Hz, which is the x5.52 ceiling.
+    250: 1075.0,
+    300: 1525.0,
+    400: 3425.0,
+    500: 20025.0,
 }
+
+# Steady-state accumulation factor for a train at rate ``f``: sum of a geometric
+# series in exp(-ISI / tau_m).  MEASURED f-I ladder above feeds this, so a
+# "temporal summation" claim can be checked against arithmetic and then against
+# spikes.  At 500 Hz (the refractory ceiling) it is x5.52 -- the bound the L3 spec
+# quotes -- and this LIF cannot go higher at any current.
+def summation_factor(rate_hz: float, tau_m_ms: float = 10.0) -> float:
+    """Steady-state PSP multiplier for a periodic train at ``rate_hz``."""
+    if rate_hz <= 0:
+        return 1.0
+    return 1.0 / (1.0 - np.exp(-(1000.0 / float(rate_hz)) / tau_m_ms))
 
 # The bar one synchronous volley must clear to fire a cell that is already firing
 # (Child 0a): at 2x rheobase the presynaptic ISI is 8.93 ms, so a single summed
@@ -184,7 +203,18 @@ def open_loop_gap_mV(background_pa: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def build_live_weights(meta_df, sources, synapse_counts):
+def net_data_sources(network):
+    """The presynaptic row index of every synapse, in ``network.S`` order.
+
+    ``FullVNCNetwork`` connects with ``S.connect(i=sources, j=targets)``, so the
+    synapse ordering IS the ``connectivity.npz`` ordering and this array indexes
+    ``S.w`` directly.  Remember ``sources`` holds meta.csv ROW INDICES, not
+    bodyIds.
+    """
+    return np.asarray(network.net_data["sources"], dtype=np.int64)
+
+
+def build_live_weights(meta_df, sources, synapse_counts, nt_sign_map=None):
     """Per-synapse weight in mV, reproducing the training harness exactly.
 
     This is deliberately *not* read off the formula quoted in ``network.py``'s
@@ -204,8 +234,17 @@ def build_live_weights(meta_df, sources, synapse_counts):
     ``synapse_counts`` is the raw ``weights`` array from ``connectivity.npz``,
     which holds synapse *counts* (1-1032), not mV.  The mV conversion happens
     here and only here.
+
+    ``nt_sign_map`` overrides ``constants.NT_SIGN_MAP`` for a sign-policy
+    sensitivity sweep (``sign_policy.py``).  It is an OVERRIDE of the imported
+    map, never a reimplementation: an earlier draft of the sign issue wrongly
+    called ``histamine`` a defect precisely because the map was rewritten from
+    memory instead of read from ``constants.py``.  ``None`` keeps the shipped
+    default, so every existing caller is byte-identical.
     """
     from .constants import NT_SIGN_MAP
+
+    sign_map = NT_SIGN_MAP if nt_sign_map is None else nt_sign_map
 
     nt_col = None
     for col in ["consensusNt", "predictedNt", "celltypePredictedNt"]:
@@ -221,7 +260,7 @@ def build_live_weights(meta_df, sources, synapse_counts):
     else:
         confidence = np.full(len(meta_df), 0.5, dtype=float)
 
-    sign_vector = np.array([NT_SIGN_MAP.get(nt, 0) or 0 for nt in nt_series])
+    sign_vector = np.array([sign_map.get(nt, 0) or 0 for nt in nt_series])
 
     inh_attenuation = 0.5
     scale = 0.6
@@ -236,8 +275,12 @@ def build_live_weights(meta_df, sources, synapse_counts):
     return weights_mV, sign_vector, nt_col
 
 
-def load_full_vnc():
-    """Load the cached full-VNC snapshot and convert counts to live-path mV."""
+def load_full_vnc(nt_sign_map=None):
+    """Load the cached full-VNC snapshot and convert counts to live-path mV.
+
+    ``nt_sign_map`` is passed straight through to ``build_live_weights``; the
+    default reproduces the shipped ``constants.NT_SIGN_MAP`` exactly.
+    """
     from .functional_selection import get_or_build_full_vnc_network
 
     body_ids, meta_df, motor_leg_map, sources, targets, counts = (
@@ -259,7 +302,9 @@ def load_full_vnc():
             "meta.csv rows, so every lookup downstream would be silently wrong."
         )
 
-    weights_mV, sign_vector, nt_col = build_live_weights(meta_df, sources, counts)
+    weights_mV, sign_vector, nt_col = build_live_weights(
+        meta_df, sources, counts, nt_sign_map=nt_sign_map
+    )
     return {
         "body_ids": body_ids,
         "meta_df": meta_df,
@@ -1156,6 +1201,10 @@ def run_lockstep_multi(
     watch=None,
     drive_pa_by_class=None,
     drive_ms_by_class=None,
+    drive_idx_pa=None,
+    drive_idx_until_ms=None,
+    cut_source_idx=None,
+    background_excludes_pool=False,
     background_pa=0.0,
     background_poisson_hz=None,
     background_weight_mV=BACKGROUND_WEIGHT_MV,
@@ -1226,6 +1275,16 @@ def run_lockstep_multi(
     pool = in_scope_pool_for_muscles(decoder, muscles)
     pool_idx = np.array([a.net_index for a in pool], dtype=np.int64)
     aff_idx = np.asarray(encoder.sensory_indices, dtype=np.int64)
+    # ``drive_idx_pa`` moves the STIMULUS off the motor pool and onto an arbitrary
+    # set of neurons (Level 3: descending neurons).  The motor pool is then a
+    # readout rather than an input -- it still decodes to the muscles, so the body
+    # still moves, but no current is injected into it and it must be fired through
+    # the connectome.  ``stim_idx`` is whatever is actually being injected, and it
+    # is what the background has to be withheld from.
+    stim_idx = (
+        pool_idx if drive_idx_pa is None
+        else np.array(sorted(drive_idx_pa), dtype=np.int64)
+    )
 
     n_steps = int(round(burst_ms / DT_MS))
     window = int(round(rate_window_ms / DT_MS))
@@ -1234,12 +1293,37 @@ def run_lockstep_multi(
     reset_body(sim, model, data, state)
     network.reset()
 
+    # ``cut_source_idx`` zeroes every OUTGOING synapse of the named neurons, so
+    # they still receive the stimulus and still fire but deliver nothing.  This is
+    # the control that separates "the stimulated neuron's projection did it" from
+    # "the stimulus perturbed a network that was going to fire anyway".  Without
+    # it, at a high background a stimulus of ANY kind can look like conduction.
+    n_cut = 0
+    if cut_source_idx is not None and len(cut_source_idx):
+        from brian2 import mV as _mV
+
+        cut = np.isin(net_data_sources(network), sorted(cut_source_idx))
+        w_cut = network._weights_mV.copy()
+        w_cut[cut] = 0.0
+        network.S.w = w_cut * _mV
+        n_cut = int(cut.sum())
+
     # The background changes the RELAYS' operating point, so it must not reach the
     # driven motor pool (that would change the motor drive) or the afferents (that
     # would change the sensory gain, which 0b calibrated).
     bg_mask = np.ones(network.n_neurons, dtype=bool)
-    bg_mask[pool_idx] = False
+    bg_mask[stim_idx] = False
     bg_mask[aff_idx] = False
+    if drive_idx_pa is not None:
+        # At Level 3 the motor pool is the READOUT.  Excluding it from the
+        # background would be excluding the thing being measured, so by default it
+        # is left in -- but that is a CHOICE with teeth: at 125 pA it holds every
+        # motor neuron 12.5 mV depolarised, so it needs 7.5 mV rather than 20 mV
+        # from the descending volley.  Level 1's sweep excluded its driven pool, so
+        # "the usable window is 0-125 pA" was measured under the opposite
+        # convention and does not transfer unexamined.  ``background_excludes_pool``
+        # runs it both ways so the difference is a measurement.
+        bg_mask[pool_idx] = not background_excludes_pool
     background = np.where(bg_mask, float(background_pa), 0.0)
 
     hist = np.zeros((n_steps, len(pool_idx)), dtype=bool)
@@ -1250,7 +1334,15 @@ def run_lockstep_multi(
         "afferent_pa": np.zeros((n_steps, len(aff_idx))),
     }
     drive = np.zeros(network.n_neurons)
-    if drive_pa_by_class is None:
+    if drive_idx_pa is not None:
+        drive_until = np.full(network.n_neurons, np.inf)
+        for idx_, pa_ in drive_idx_pa.items():
+            drive[int(idx_)] = float(pa_)
+        if drive_idx_until_ms is not None:
+            drive_until[:] = np.inf
+            for idx_, t_ in drive_idx_until_ms.items():
+                drive_until[int(idx_)] = float(t_)
+    elif drive_pa_by_class is None:
         drive[pool_idx] = drive_pa
         # No per-class gating: every driven neuron is on for the whole burst.
         drive_until = np.full(network.n_neurons, np.inf)
@@ -1410,6 +1502,10 @@ def run_lockstep_multi(
         tr["settle_n_active"] = 0
     tr["pool_rate_hz"] = hist.sum() / (len(pool_idx) * burst_ms / 1000.0)
     tr["pool_idx"] = pool_idx
+    tr["stim_idx"] = stim_idx
+    tr["n_cut_synapses"] = n_cut
+    tr["background_excludes_pool"] = bool(background_excludes_pool)
+    tr["n_bg_targets"] = int(bg_mask.sum())
     tr["afferent_idx"] = aff_idx
     tr["muscles"] = muscles
     tr["peak_dv"] = peak_dv
@@ -3176,8 +3272,754 @@ def _print_background_sweep(table, meta_type, encoder):
 
 
 # ---------------------------------------------------------------------------
-# Driver
+# Deliverable 8 (Level 3, outbound half): does a DESCENDING COMMAND fire LF
+# motor neurons?  Every measurement above injected current directly into the
+# motor pool, so the motor neurons were an INPUT.  Here they are the READOUT and
+# nothing is injected into them: the stimulus goes onto descending neurons and
+# has to arrive through the connectome.
 # ---------------------------------------------------------------------------
+
+# Background is the one thing the L1 work says must be set BEFORE the first
+# measurement, so the L3 sweep runs its whole DN ladder at each of these and the
+# 0 pA row is present only as the (retired) silent-network reference.  The window
+# is the one measured at Level 1: usable 0-125 pA, spontaneous above.
+L3_BACKGROUND_LADDER_PA: tuple[float, ...] = (0.0, 75.0, 125.0)
+
+# DN drive rates.  20-200 Hz is the measured f-I ladder; 250-500 Hz exists only
+# to bound temporal summation and is ABOVE any recorded Drosophila rate (500 Hz
+# is this LIF's refractory ceiling, the x5.52 bound).
+L3_DN_RATES_HZ: tuple[int, ...] = (50, 200, 500)
+
+
+def dn_cells(meta_df, names):
+    """Resolve DN specifiers to individual cells.
+
+    A specifier is either a ``type`` name (``"DNa02"``) or an ``int`` bodyId.
+    Returns a list of ``(row_index, bodyId, type, somaSide, consensusNt)``.
+
+    **A type name covers several cells and they are not equivalent.** ``DNa02``
+    has 2 (bodyIds 10360 R, 523769 L), ``MDN`` has 4, and at Level 1
+    ``IN21A004``'s six same-named cells differed by 46-vs-0 motor contacts.  So a
+    bodyId specifier is available and nothing is ever reported per type.
+    """
+    out = []
+    for name in names:
+        if isinstance(name, (int, np.integer)):
+            sub = meta_df[meta_df["bodyId"] == int(name)]
+            if sub.empty:
+                raise KeyError(f"no neuron with bodyId {name} in the snapshot")
+        else:
+            sub = meta_df[meta_df["type"] == name]
+            if sub.empty:
+                raise KeyError(f"no neuron of type {name!r} in the snapshot")
+        for idx, r in sub.iterrows():
+            if r["superclass"] not in (
+                "descending_neuron", "descending_neuron_tbc", "sensory_descending"
+            ):
+                raise ValueError(
+                    f"{name!r} (bodyId {r['bodyId']}) has superclass "
+                    f"{r['superclass']!r}, not a descending neuron"
+                )
+            out.append((int(idx), int(r["bodyId"]), r["type"], r["somaSide"],
+                        r["consensusNt"]))
+    return out
+
+
+def dn_outbound_arithmetic(net_data, dn_idx, in_scope_idx):
+    """Static hop-1 / hop-2 arithmetic for a DN set, from the LIVE weight path.
+
+    The figures in the L3 spec came from the formula quoted in a ``network.py``
+    comment (``log1p(count) * 0.6``, unsigned, no confidence), which is NOT what
+    the harness runs.  Both are returned so the difference is visible: the live
+    path applies the NT sign, the ``predictedNtConfidence`` factor and the 0.5
+    inhibitory attenuation, and gives weight exactly 0 to the four NTs that map to
+    ``None``.
+    """
+    src, tgt = net_data["sources"], net_data["targets"]
+    w, cnt = net_data["weights_mV"], net_data["counts"]
+    w_comment = np.log1p(cnt) * 0.6          # the docstring formula, unsigned
+    dn_idx = np.asarray(sorted(dn_idx), dtype=np.int64)
+    ins = np.asarray(sorted(in_scope_idx), dtype=np.int64)
+
+    m1 = np.isin(src, dn_idx)
+    hop1 = pd.DataFrame({"post": tgt[m1], "w": w[m1], "wc": w_comment[m1]})
+    g1 = hop1.groupby("post").agg(live=("w", "sum"), comment=("wc", "sum"))
+    direct = m1 & np.isin(tgt, ins)
+
+    t1 = g1.index.values
+    m2 = np.isin(src, t1) & np.isin(tgt, ins)
+    g2 = pd.DataFrame({"post": tgt[m2], "w": w[m2]}).groupby("post").w.sum()
+
+    return {
+        "n_direct_syn": int(direct.sum()),
+        "direct_mV": float(w[direct].sum()),
+        "n_hop1": int(len(g1)),
+        "hop1_live_median": float(g1["live"].median()) if len(g1) else np.nan,
+        "hop1_live_max": float(g1["live"].max()) if len(g1) else np.nan,
+        "hop1_live_ge20": int((g1["live"] >= FROM_REST_BAR_MV).sum()),
+        "hop1_comment_max": float(g1["comment"].max()) if len(g1) else np.nan,
+        "n_mn_reached_2hop": int(len(g2)),
+        "hop2_median": float(g2.median()) if len(g2) else np.nan,
+        "hop2_max": float(g2.max()) if len(g2) else np.nan,
+        "hop1_table": g1,
+    }
+
+
+def _l3_row(net_data, encoder, in_scope_idx, presyn_idx, times, indices, tr,
+            label, dn_cell_idx, hop1_idx):
+    """One L3 condition: who fired, when, and at which stage."""
+    aff = np.asarray(encoder.sensory_indices, dtype=np.int64)
+    fired = set(np.unique(indices).tolist())
+    ins = np.asarray(sorted(in_scope_idx), dtype=np.int64)
+
+    def first_t(sel_idx):
+        sel = np.isin(indices, list(sel_idx))
+        return float(times[sel].min()) if sel.any() else np.nan
+
+    mn_fired = sorted(set(ins.tolist()) & fired)
+    dn_fired = sorted(set(dn_cell_idx) & fired)
+    relay_fired = sorted((set(hop1_idx) & fired) - set(ins.tolist())
+                         - set(dn_cell_idx))
+    aff_fired = sorted(set(aff.tolist()) & fired)
+
+    per_mn = {}
+    for x in mn_fired:
+        sel = indices == x
+        per_mn[int(x)] = {
+            "t_first_ms": float(times[sel].min()),
+            "n_spikes": int(sel.sum()),
+        }
+    per_dn = {}
+    for x in dn_cell_idx:
+        sel = indices == x
+        per_dn[int(x)] = {
+            "t_first_ms": float(times[sel].min()) if sel.any() else np.nan,
+            "n_spikes": int(sel.sum()),
+        }
+    per_relay = {}
+    for x in relay_fired:
+        sel = indices == x
+        per_relay[int(x)] = {
+            "t_first_ms": float(times[sel].min()),
+            "n_spikes": int(sel.sum()),
+        }
+
+    return {
+        "condition": label,
+        "n_dn_fired": len(dn_fired),
+        "t_dn_ms": first_t(dn_cell_idx),
+        "dn_spikes": int(np.isin(indices, list(dn_cell_idx)).sum()),
+        "n_relay_fired": len(relay_fired),
+        "t_relay_ms": first_t(relay_fired) if relay_fired else np.nan,
+        "n_mn_fired": len(mn_fired),
+        "t_mn_ms": first_t(mn_fired) if mn_fired else np.nan,
+        "mn_spikes": int(np.isin(indices, ins).sum()),
+        "n_aff_fired": len(aff_fired),
+        "t_aff_ms": first_t(aff_fired) if aff_fired else np.nan,
+        "n_active": int(len(fired)),
+        "net_hz": float(len(indices) / 25635.0),
+        "excursion_rad": float(np.abs(tr["angles"] - tr["angles"][0]).max()),
+        "act_peak": float(tr["activations"].max()),
+        "mn_idx": mn_fired,
+        "per_mn": per_mn,
+        "per_dn": per_dn,
+        "per_relay": per_relay,
+        "relay_idx": relay_fired,
+        "settle_hz_mean": tr["settle_hz_mean"],
+        "settle_dv": dict(tr["settle_dv"]),
+    }
+
+
+def measure_l3_outbound(
+    net_data=None,
+    conduction=None,
+    dn_sets=None,
+    rates_hz=L3_DN_RATES_HZ,
+    background_pa=L3_BACKGROUND_LADDER_PA,
+    burst_ms=200.0,
+    settle_ms=BACKGROUND_SETTLE_MS,
+    verbose=True,
+):
+    """Deliverable 8: the Level 3 OUTBOUND exit gate.
+
+    ``descending neuron -> VNC interneurons -> LF motor neurons``.  Does a
+    descending command make named LF motor neurons spike?  The full loop (back to
+    the originating DN) is a later experiment; if the outbound half does not
+    conduct nothing downstream is interpretable.
+
+    Three things make this different from every earlier sweep in this file:
+
+    * **the stimulus is not the motor pool.**  ``drive_idx_pa`` injects current
+      into descending neurons only.  The 52 in-scope LF motor neurons receive no
+      current at all and must be fired through 4.1M connectome synapses.  They
+      still decode to the 15 muscles, so the body still moves.
+    * **the background operating point is set before the first measurement**, not
+      after.  Level 1 published a 5x-inflated latency because relays were pinned
+      at exactly ``V_rest``; the usable window it measured is 0-125 pA, and the
+      whole DN ladder is run at each level in that window.
+    * **three candidate resolutions are separated rather than combined.**  Rate
+      (temporal summation, bounded at x5.52 by the refractory ceiling),
+      background, and DN co-activation are swept as independent axes, so "which
+      one was necessary" is a measurement.
+
+    **Four controls run at every condition**, and three of them are here because
+    the first pass without them produced a false positive:
+
+    1. **frozen physics** -- ``qpos``/``qvel``/``act`` pinned, all neural drive
+       unchanged.  The outbound path is purely neural so this is EXPECTED to fire
+       motor neurons; what it establishes is that no sensory current was generated
+       (asserted) and hence which motor spikes needed the body.
+    2. **no-stimulus** -- same background, DN drive off.  At Level 1 the motor
+       pool was excluded from the background so it could not fire on its own; here
+       it is the readout and is NOT excluded, so a motor spike could be
+       spontaneous.
+    3. **cut projection** -- the stimulated DNs' own outgoing synapses are zeroed.
+       They still receive the current and still fire, but deliver nothing.  This
+       is the control that distinguishes "the DN's projection fired the motor
+       neuron" from "injecting 20 nA into any two cells in a network sitting near
+       its ignition point tips it over".  **Without it the 125 pA rows read as a
+       clean pass and they are not.**
+    4. **sham DN** -- a matched-size set of descending neurons whose live-path
+       excitatory projection onto LF-reaching relays is exactly **zero**, driven
+       identically.  If the sham conducts, the result is about the stimulus
+       amplitude and the operating point, not about the descending command.
+
+    A motor neuron is credited to the descending command only if it fires with the
+    stimulus, does NOT fire in the no-stimulus control, and does NOT fire in the
+    cut-projection control.
+    """
+    from .muscle_decoder import MUSCLE_NAMES, MuscleDecoder
+
+    if net_data is None:
+        net_data = load_full_vnc()
+    meta_df, body_ids = net_data["meta_df"], net_data["body_ids"]
+    meta_type = meta_df["type"].fillna("<untyped>").values
+    meta_bid = meta_df["bodyId"].values
+
+    if conduction is not None:
+        encoder = conduction["encoder"]
+        network = conduction["network"]
+        sim, model, data, state, groups = conduction["body"]
+    else:
+        encoder = ProprioceptiveEncoder(meta_df, body_ids, leg="LF", side="L")
+        sim, model, data, state, groups, _n = build_settled_body(verbose=verbose)
+        network = FullVNCNetwork(net_data)
+
+    decoder = MuscleDecoder(meta_df, body_ids, force_model=True)
+    in_scope = lf_motor_in_scope(meta_df)
+    in_scope_idx = set(in_scope.index.values.tolist())
+    presyn_idx = set(np.unique(
+        net_data["sources"][np.isin(net_data["targets"], sorted(in_scope_idx))]
+    ).tolist())
+
+    # All 15 muscles, so any motor neuron that fires can move something.  The
+    # decode is unchanged; only the stimulus site moved.
+    muscles = tuple(MUSCLE_NAMES)
+
+    if dn_sets is None:
+        dn_sets = default_dn_sets(meta_df, net_data, in_scope_idx)
+
+    if verbose:
+        print("\n" + "=" * 78)
+        print("[8] LEVEL 3 OUTBOUND EXIT GATE: does a DESCENDING COMMAND fire LF "
+              "motor\n    neurons?")
+        print("=" * 78)
+        print(f"  stimulus: current injected into DESCENDING NEURONS ONLY.  The "
+              f"{len(in_scope_idx)} in-scope LF\n  motor neurons receive zero "
+              "injected current and must be fired through the\n  connectome.")
+        print(f"  readout: the {len(in_scope_idx)} in-scope LF MNs (64 LF MNs "
+              "minus 6 tarsus, minus 6 ltm*).")
+        print(f"  background: swept over {background_pa} pA, applied to every "
+              "neuron except the\n  stimulated DNs and the "
+              f"{len(encoder.assignments)} afferents.  Set BEFORE the first "
+              "measurement,\n  per the Level 1 correction.  Usable window "
+              "measured at L1: 0-125 pA.")
+        print(f"  {settle_ms:.0f} ms background settle, then a {burst_ms:.0f} ms "
+              "stimulus; settle spikes excluded,\n  t = 0 is stimulus onset.")
+        print("  FOUR CONTROLS AT EVERY CONDITION: (a) frozen physics; "
+              "(b) NO-STIMULUS (background\n  only); (c) CUT PROJECTION (the same "
+              "DNs driven with their outgoing synapses\n  zeroed -- they fire but "
+              "deliver nothing); (d) SHAM DN (a matched-size set whose\n  "
+              "live-path excitatory projection onto LF-reaching relays is exactly "
+              "zero).\n  A motor neuron counts only if it fires with the stimulus "
+              "and in NEITHER (b) nor (c).")
+        print("  Every number is a Brian2 SpikeMonitor count.  A current is not a "
+              "spike.")
+
+    rows = []
+    # The no-stimulus control depends only on the background, so it is run once
+    # per background level rather than once per condition.
+    nostim_cache: dict[float, dict] = {}
+
+    for bg in background_pa:
+        for set_name, names in dn_sets:
+            cells = dn_cells(meta_df, names)
+            dn_idx = [c[0] for c in cells]
+            arith = dn_outbound_arithmetic(net_data, dn_idx, in_scope_idx)
+            hop1_idx = list(arith["hop1_table"].index.values)
+
+            if bg not in nostim_cache:
+                t0 = time.time()
+                times, indices, tr = run_lockstep_multi(
+                    network, sim, model, data, state, groups, decoder, encoder,
+                    muscles, 0.0, burst_ms=burst_ms,
+                    drive_idx_pa={}, background_pa=bg,
+                    background_settle_ms=settle_ms,
+                )
+                nostim_cache[bg] = _l3_row(
+                    net_data, encoder, in_scope_idx, presyn_idx, times, indices,
+                    tr, f"nostim {bg:.0f} pA", [], [],
+                )
+                nostim_cache[bg]["wall_s"] = time.time() - t0
+                if verbose:
+                    ns = nostim_cache[bg]
+                    print(f"\n  no-stimulus control @ {bg:.0f} pA background: "
+                          f"{ns['n_mn_fired']:2d}/{len(in_scope_idx)} LF MNs fire, "
+                          f"{ns['n_active']:,} neurons active, "
+                          f"{ns['net_hz']:.3f} Hz")
+            nostim = nostim_cache[bg]
+            nostim_mn = set(nostim["mn_idx"])
+
+            for rate in rates_hz:
+                drive_pa = DRIVE_PA_FOR_HZ[rate]
+                stim = {i: drive_pa for i in dn_idx}
+                runs = {}
+                for arm, kwargs in [
+                    ("live", {}),
+                    ("frozen", {"freeze_physics": True}),
+                    ("cut", {"cut_source_idx": dn_idx}),
+                ]:
+                    t0 = time.time()
+                    times, indices, tr = run_lockstep_multi(
+                        network, sim, model, data, state, groups, decoder,
+                        encoder, muscles, 0.0, burst_ms=burst_ms,
+                        drive_idx_pa=stim,
+                        background_pa=bg, background_settle_ms=settle_ms,
+                        **kwargs,
+                    )
+                    label = f"{set_name} @ {rate} Hz, bg {bg:.0f} pA"
+                    runs[arm] = _l3_row(
+                        net_data, encoder, in_scope_idx, presyn_idx, times,
+                        indices, tr, label, dn_idx, hop1_idx,
+                    )
+                    runs[arm]["wall_s"] = time.time() - t0
+                    runs[arm]["n_cut_synapses"] = tr["n_cut_synapses"]
+                live, frozen, cut = runs["live"], runs["frozen"], runs["cut"]
+
+                # Attribution.  A motor neuron is credited to the descending
+                # command only if the stimulus fired it, the background alone did
+                # not, AND the same stimulus with the DNs' output cut did not.
+                # The third term is what stops "the network was about to ignite"
+                # being read as "the descending command drove the leg".
+                live_mn = set(live["mn_idx"])
+                cut_mn = set(cut["mn_idx"])
+                live["set_name"] = set_name
+                live["dn_names"] = tuple(str(n) for n in names)
+                live["n_dn_cells"] = len(cells)
+                live["rate_hz"] = rate
+                live["background_pa"] = bg
+                live["summation_x"] = summation_factor(rate)
+                live["arith"] = {k: v for k, v in arith.items()
+                                 if k != "hop1_table"}
+                live["n_mn_nostim"] = nostim["n_mn_fired"]
+                live["n_mn_cut"] = cut["n_mn_fired"]
+                live["n_relay_cut"] = cut["n_relay_fired"]
+                live["n_cut_synapses"] = cut["n_cut_synapses"]
+                live["mn_attributable"] = sorted(live_mn - nostim_mn - cut_mn)
+                live["n_mn_attributable"] = len(live_mn - nostim_mn - cut_mn)
+                live["n_mn_frozen"] = frozen["n_mn_fired"]
+                live["mn_frozen_idx"] = frozen["mn_idx"]
+                live["n_aff_frozen"] = frozen["n_aff_fired"]
+                live["frozen_net_hz"] = frozen["net_hz"]
+                # Motor neurons that needed the BODY: fired live, not frozen, and
+                # not in either negative control.
+                live["n_mn_body_only"] = len(
+                    live_mn - set(frozen["mn_idx"]) - nostim_mn - cut_mn
+                )
+                live["t_mn_attributable_ms"] = (
+                    min(live["per_mn"][x]["t_first_ms"]
+                        for x in live["mn_attributable"])
+                    if live["mn_attributable"] else np.nan
+                )
+                live["conducts"] = bool(live["n_mn_attributable"] > 0)
+                rows.append(live)
+
+                if verbose:
+                    r = live
+                    print(f"\n  {label}")
+                    print(f"    DN set: {len(cells)} cells "
+                          + ", ".join(f"{c[2]}/{c[1]}({c[3]})" for c in cells))
+                    print(f"    static (live weight path): hop1 "
+                          f"{arith['n_hop1']} targets, PSP median "
+                          f"{arith['hop1_live_median']:.2f} max "
+                          f"{arith['hop1_live_max']:.2f} mV, "
+                          f"{arith['hop1_live_ge20']} of {arith['n_hop1']} "
+                          f">= {FROM_REST_BAR_MV:.0f} mV")
+                    print(f"    LIVE   DN {r['n_dn_fired']}/{len(cells)} spiked "
+                          f"({r['dn_spikes']:,} spikes) t "
+                          + (" -- " if np.isnan(r["t_dn_ms"])
+                             else f"{r['t_dn_ms']:.1f}")
+                          + f" ms | relays {r['n_relay_fired']:4d} t "
+                          + ("  -- " if np.isnan(r["t_relay_ms"])
+                             else f"{r['t_relay_ms']:5.1f}")
+                          + f" ms | LF MN {r['n_mn_fired']:2d}/"
+                          f"{len(in_scope_idx)} t "
+                          + ("  -- " if np.isnan(r["t_mn_ms"])
+                             else f"{r['t_mn_ms']:5.1f}") + " ms")
+                    print(f"    CONTROLS  no-stim {r['n_mn_nostim']:2d} MNs | "
+                          f"frozen {r['n_mn_frozen']:2d} MNs / "
+                          f"{r['n_aff_frozen']:2d} aff | CUT "
+                          f"({r['n_cut_synapses']:,} syn zeroed) "
+                          f"{r['n_mn_cut']:2d} MNs, {r['n_relay_cut']:4d} relays")
+                    print(f"    -> ATTRIBUTABLE {r['n_mn_attributable']:2d}/"
+                          f"{len(in_scope_idx)} LF MNs"
+                          f"   {'CONDUCTS' if r['conducts'] else 'no conduction'}")
+                    print(f"    body: excursion {r['excursion_rad']:.3f} rad, "
+                          f"peak activation {r['act_peak']:.3f}, afferents "
+                          f"{r['n_aff_fired']}/{len(encoder.assignments)}")
+
+    table = pd.DataFrame(rows)
+    if verbose:
+        _print_l3_outbound(table, nostim_cache, meta_type, meta_bid,
+                           len(in_scope_idx), encoder)
+    return {"table": table, "nostim": nostim_cache, "decoder": decoder,
+            "in_scope_idx": in_scope_idx}
+
+
+def default_dn_sets(meta_df, net_data, in_scope_idx):
+    """The DN sets to test, and why each one is in the list.
+
+    ``DNa02`` is the behaviourally identified walking command and the neuron this
+    project has used throughout.  Ranked by summed outbound PSP onto interneurons
+    that reach LF motor neurons it is NOT a strong driver, so a strong-DN set is
+    tested alongside it -- that set establishes whether the outbound path can
+    conduct at all, which is a different question from whether DNa02 can drive it.
+
+    The strong set is recomputed from the LIVE weight path here rather than taken
+    from the L3 spec's table, because the spec's ranking used the unsigned formula
+    from a ``network.py`` comment and the live path disagrees with it sharply (see
+    the lab entry).
+    """
+    src, tgt, w = net_data["sources"], net_data["targets"], net_data["weights_mV"]
+    ins = np.asarray(sorted(in_scope_idx), dtype=np.int64)
+    dn_all = meta_df.index[meta_df["superclass"] == "descending_neuron"].values
+
+    # Relays with a NET EXCITATORY output onto in-scope LF MNs.  A DN that drives
+    # only inhibitory relays cannot make a motor neuron fire no matter how strong
+    # the projection is, so ranking without the sign is ranking the wrong thing.
+    m_mn = np.isin(tgt, ins)
+    relay_out = pd.DataFrame({"pre": src[m_mn], "w": w[m_mn]}).groupby("pre").w.sum()
+    exc_relays = relay_out[relay_out > 0].index.values
+
+    m_dn = np.isin(src, dn_all) & np.isin(tgt, exc_relays)
+    d = pd.DataFrame({"pre": src[m_dn], "w": w[m_dn]})
+    d = d[d.w > 0]
+    rank = d.groupby("pre").w.sum().sort_values(ascending=False)
+
+    top = [int(i) for i in rank.head(6).index.values]
+    top_names = []
+    for i in top:
+        nm = meta_df.loc[i, "type"]
+        if nm not in top_names:
+            top_names.append(nm)
+
+    # SHAM.  Descending neurons whose live-path excitatory projection onto
+    # LF-reaching excitatory relays is exactly 0 mV, but which still have a LARGE
+    # total excitatory output elsewhere in the VNC.  That second condition matters:
+    # the four NTs mapping to sign ``None`` give a cell weight exactly 0 on every
+    # synapse, so ranking only on "0 mV onto LF relays" would pick an electrically
+    # silent cell and the sham would degenerate into the cut control.  A sham has to
+    # be able to excite the network, just not this motor pool.
+    m_exc = np.isin(src, dn_all) & (w > 0)
+    tot_exc = pd.DataFrame({"pre": src[m_exc], "w": w[m_exc]}).groupby("pre").w.sum()
+    zero = [int(i) for i in dn_all
+            if float(rank.get(i, 0.0)) == 0.0 and float(tot_exc.get(i, 0.0)) > 0.0]
+    sham = sorted(zero, key=lambda i: -float(tot_exc.get(i, 0.0)))[:2]
+    sham_bids = [int(meta_df.loc[i, "bodyId"]) for i in sham]
+    sham_label = "sham (0 onto LF relays, " + ", ".join(
+        f"{meta_df.loc[i, 'type']}/{meta_df.loc[i, 'bodyId']}"
+        f"={tot_exc.get(i, 0.0):.0f}mV elsewhere" for i in sham
+    ) + ")"
+
+    return [
+        # The behaviourally meaningful command, per cell and pooled.  DNa02 has
+        # 2 cells with very different projections onto LF-reaching relays
+        # (523769 L is 3x 10360 R on the live path), so they are never pooled
+        # silently.
+        ("DNa02/523769 L only", [523769]),
+        ("DNa02/10360 R only", [10360]),
+        ("DNa02 both cells", ["DNa02"]),
+        # Whether the path can conduct at all, from the live-path ranking.
+        (f"top1 live-path ({top_names[0]})", [top_names[0]]),
+        ("top6 live-path co-activation", top_names[:6]),
+        # The spec's strong-DN set, from the unsigned comment formula.  Kept as a
+        # named condition because the spec asks for it and because the two
+        # rankings disagreeing is itself the finding.
+        ("spec strong-DN set", ["DNg34", "DNg74_a", "DNge149", "DNg100",
+                               "DNd03", "DNd02"]),
+        # The sham, which is the condition that decides whether any of the above
+        # means anything.
+        (sham_label, sham_bids),
+    ]
+
+
+def measure_l3_background_convention(
+    net_data=None,
+    conduction=None,
+    dn_names=("DNa02",),
+    rate_hz=500,
+    background_pa=(75.0, 125.0),
+    burst_ms=200.0,
+    settle_ms=BACKGROUND_SETTLE_MS,
+    verbose=True,
+):
+    """Is the L3 result a property of the DN, or of where the background is applied?
+
+    Level 1's sweep withheld the background from its **driven motor pool**, so
+    "the usable window is 0-125 pA" was measured with the motor neurons at exactly
+    ``V_rest``.  At Level 3 the motor pool is the readout, and if it is left inside
+    the background then at 125 pA every motor neuron idles 12.5 mV depolarised and
+    needs 7.5 mV rather than 20 mV from the descending volley.
+
+    That is a candidate for the SIXTH self-inflicted artefact on this project: a
+    convention inherited from a sweep with the opposite roles, read back as a
+    property of descending control.  This runs the same condition both ways --
+    background on the motor pool, and background withheld from it -- with the cut
+    and no-stimulus controls in each arm.  Nothing else changes.
+    """
+    from .muscle_decoder import MUSCLE_NAMES, MuscleDecoder
+
+    if net_data is None:
+        net_data = load_full_vnc()
+    meta_df, body_ids = net_data["meta_df"], net_data["body_ids"]
+
+    if conduction is not None:
+        encoder = conduction["encoder"]
+        network = conduction["network"]
+        sim, model, data, state, groups = conduction["body"]
+    else:
+        encoder = ProprioceptiveEncoder(meta_df, body_ids, leg="LF", side="L")
+        sim, model, data, state, groups, _n = build_settled_body(verbose=verbose)
+        network = FullVNCNetwork(net_data)
+
+    decoder = MuscleDecoder(meta_df, body_ids, force_model=True)
+    in_scope_idx = set(lf_motor_in_scope(meta_df).index.values.tolist())
+    presyn_idx = set(np.unique(
+        net_data["sources"][np.isin(net_data["targets"], sorted(in_scope_idx))]
+    ).tolist())
+    muscles = tuple(MUSCLE_NAMES)
+    cells = dn_cells(meta_df, list(dn_names))
+    dn_idx = [c[0] for c in cells]
+    arith = dn_outbound_arithmetic(net_data, dn_idx, in_scope_idx)
+    hop1_idx = list(arith["hop1_table"].index.values)
+    drive_pa = DRIVE_PA_FOR_HZ[rate_hz]
+
+    if verbose:
+        print("\n" + "=" * 78)
+        print("[8b] IS THE BACKGROUND CONVENTION DOING THE WORK?  "
+              "(candidate artefact #6)")
+        print("=" * 78)
+        print(f"  {'/'.join(str(n) for n in dn_names)} at {rate_hz} Hz, "
+              f"{burst_ms:.0f} ms.  The ONLY thing that changes between the two "
+              "arms is\n  whether the 52 readout motor neurons are inside the "
+              "background or held at V_rest.")
+        print("  L1's sweep withheld the background from its DRIVEN pool.  Here "
+              "the pool is the\n  READOUT, so inheriting that convention is not "
+              "automatic -- it is a choice, and this\n  measures what it is worth "
+              "in motor neurons.")
+
+    rows = []
+    for bg in background_pa:
+        for excl in (False, True):
+            out = {}
+            for arm, kwargs in [
+                ("live", {}),
+                ("cut", {"cut_source_idx": dn_idx}),
+                ("nostim", {"__nostim": True}),
+            ]:
+                stim = {} if kwargs.pop("__nostim", False) else {
+                    i: drive_pa for i in dn_idx
+                }
+                times, indices, tr = run_lockstep_multi(
+                    network, sim, model, data, state, groups, decoder, encoder,
+                    muscles, 0.0, burst_ms=burst_ms, drive_idx_pa=stim,
+                    background_pa=bg, background_excludes_pool=excl,
+                    background_settle_ms=settle_ms, **kwargs,
+                )
+                out[arm] = _l3_row(
+                    net_data, encoder, in_scope_idx, presyn_idx, times, indices,
+                    tr, f"bg {bg:.0f} excl={excl}", dn_idx, hop1_idx,
+                )
+            attr = (set(out["live"]["mn_idx"]) - set(out["cut"]["mn_idx"])
+                    - set(out["nostim"]["mn_idx"]))
+            row = {
+                "background_pa": bg,
+                "pool_excluded": excl,
+                "n_mn_live": out["live"]["n_mn_fired"],
+                "n_mn_cut": out["cut"]["n_mn_fired"],
+                "n_mn_nostim": out["nostim"]["n_mn_fired"],
+                "n_mn_attributable": len(attr),
+                "t_mn_ms": out["live"]["t_mn_ms"],
+                "n_relay": out["live"]["n_relay_fired"],
+                "excursion_rad": out["live"]["excursion_rad"],
+            }
+            rows.append(row)
+            if verbose:
+                print(f"\n  bg {bg:5.0f} pA, motor pool "
+                      f"{'EXCLUDED (at V_rest, as L1 did)' if excl else 'INCLUDED (idles +' + f'{bg * 0.1:.1f}' + ' mV)'}")
+                print(f"    live {row['n_mn_live']:2d}/{len(in_scope_idx)} MNs | "
+                      f"cut {row['n_mn_cut']:2d} | nostim "
+                      f"{row['n_mn_nostim']:2d} -> attributable "
+                      f"{row['n_mn_attributable']:2d}, t_MN "
+                      + ("  -- " if np.isnan(row["t_mn_ms"])
+                         else f"{row['t_mn_ms']:.1f}") + " ms")
+
+    table = pd.DataFrame(rows)
+    if verbose:
+        print("\n  VERDICT")
+        for bg in background_pa:
+            inc = table[(table.background_pa == bg) & ~table.pool_excluded]
+            exc = table[(table.background_pa == bg) & table.pool_excluded]
+            a_i = int(inc["n_mn_attributable"].iloc[0])
+            a_e = int(exc["n_mn_attributable"].iloc[0])
+            print(f"    {bg:5.0f} pA: {a_i} MNs with the pool in the background, "
+                  f"{a_e} with it at V_rest")
+        both = table.groupby("pool_excluded")["n_mn_attributable"].max()
+        if both.get(True, 0) == 0 and both.get(False, 0) > 0:
+            print("    ARTEFACT CONFIRMED.  Every motor neuron this experiment "
+                  "counts is one that was\n    already held sub-threshold by the "
+                  "background we chose to apply to it.  With the\n    readout at "
+                  "V_rest -- the convention Level 1 used for its driven pool -- "
+                  "the\n    descending command fires NOTHING.  The conduction is "
+                  "a property of the operating\n    point, not of the projection.")
+        elif both.get(True, 0) > 0:
+            print("    NOT an artefact of the convention: the descending command "
+                  "fires motor neurons\n    even with the readout pool held at "
+                  "V_rest.")
+    return {"table": table}
+
+
+def _print_l3_outbound(table, nostim, meta_type, meta_bid, n_in_scope, encoder):
+    """The L3 sweep table, the per-stage latencies, and the exit-gate verdict."""
+    print("\n  SWEEP.  'MN' = in-scope LF motor neurons that fired with the "
+          "stimulus on.\n  'ns' = no-stimulus control (background only). "
+          "'cut' = the SAME stimulus with the\n  stimulated DNs' outgoing "
+          "synapses zeroed.  'fz' = frozen physics.  'attr' = MN\n  minus ns "
+          "minus cut, i.e. attributable to the descending projection.\n  "
+          "'t_DN'/'t_relay'/'t_MN' are first-spike times per stage from stimulus "
+          "onset.")
+    print(f"\n    {'condition':<46} {'x_sum':>6} {'DN':>5} {'relay':>6} "
+          f"{'MN':>6} {'ns':>4} {'cut':>4} {'fz':>4} {'attr':>5} "
+          f"{'t_DN':>6} {'t_rly':>6} {'t_MN':>6} {'exc':>7}  verdict")
+    for r in table.itertuples():
+        def f(x, w=6, p=1):
+            return " " * (w - 2) + "--" if np.isnan(x) else f"{x:{w}.{p}f}"
+        verdict = "CONDUCTS" if r.conducts else "no conduction"
+        print(f"    {r.condition[:46]:<46} {r.summation_x:6.2f} "
+              f"{r.n_dn_fired:2d}/{r.n_dn_cells:<2d} {r.n_relay_fired:6d} "
+              f"{r.n_mn_fired:3d}/{n_in_scope:<2d} {r.n_mn_nostim:4d} "
+              f"{r.n_mn_cut:4d} {r.n_mn_frozen:4d} {r.n_mn_attributable:5d} "
+              f"{f(r.t_dn_ms)} {f(r.t_relay_ms)} {f(r.t_mn_ms)} "
+              f"{r.excursion_rad:7.3f}  {verdict}")
+
+    # The sham is the row that decides whether the rest is a measurement.
+    sham = table[table["set_name"].str.startswith("sham")]
+    if not sham.empty:
+        print("\n  THE SHAM-DN CONTROL (identical stimulus onto DNs with a 0 mV "
+              "live-path\n  projection onto LF-reaching relays)")
+        for r in sham.itertuples():
+            print(f"    {r.rate_hz:4d} Hz, bg {r.background_pa:5.0f} pA: "
+                  f"{r.n_mn_fired:2d}/{n_in_scope} LF MNs fire, "
+                  f"{r.n_mn_attributable:2d} attributable"
+                  + ("   <-- FALSE POSITIVE" if r.conducts else ""))
+        if bool(sham["conducts"].any()):
+            bad = sorted(set(
+                zip(sham[sham.conducts].rate_hz, sham[sham.conducts].background_pa)
+            ))
+            print("    The sham CONDUCTS at " + ", ".join(
+                f"{int(a)} Hz / {b:.0f} pA" for a, b in bad
+            ) + ".\n    Every row at those settings is uninterpretable: the "
+                "stimulus fires motor neurons\n    through a projection that "
+                "does not exist, so it is the amplitude and the\n    operating "
+                "point doing the work, not the descending command.")
+        else:
+            print("    The sham is silent at every setting, so a positive row is "
+                  "attributable to the\n    DN's own projection.")
+
+    interpretable = table[~table["set_name"].str.startswith("sham")]
+    if not sham.empty and bool(sham["conducts"].any()):
+        bad_pairs = set(zip(sham[sham.conducts].rate_hz,
+                            sham[sham.conducts].background_pa))
+        interpretable = interpretable[~interpretable.apply(
+            lambda r: (r["rate_hz"], r["background_pa"]) in bad_pairs, axis=1
+        )]
+        print(f"\n  {len(table) - len(interpretable) - len(sham)} real rows fall "
+              f"at sham-positive settings and are EXCLUDED.\n  "
+              f"{len(interpretable)} rows remain interpretable.")
+
+    conducting = interpretable[interpretable["conducts"]]
+    print("\n  EXIT GATE")
+    if conducting.empty:
+        print("    FAILED.  No interpretable condition made an in-scope LF motor "
+              "neuron fire that\n    the background alone, and the same stimulus "
+              "with the projection cut, did not.\n    Level 3 is blocked: the "
+              "full-loop experiment cannot be interpreted, because the\n    "
+              "outbound half does not conduct.  This is a RESULT about descending "
+              "control in this\n    connectome, not a broken measurement -- the "
+              "controls are what make it one.")
+        return
+    print(f"    PASSED for {len(conducting)} of {len(interpretable)} "
+          f"interpretable conditions.")
+    best = conducting.loc[conducting["n_mn_attributable"].idxmax()]
+    print(f"    most motor neurons: {int(best['n_mn_attributable'])} of "
+          f"{n_in_scope} at {best['condition']}")
+    fastest = conducting.loc[conducting["t_mn_attributable_ms"].idxmin()]
+    print(f"    fastest: DN spike {fastest['t_dn_ms']:.1f} ms -> relay "
+          f"{fastest['t_relay_ms']:.1f} ms -> LF MN "
+          f"{fastest['t_mn_attributable_ms']:.1f} ms at "
+          f"{fastest['condition']}")
+
+    # Which of the three resolutions was necessary?  Each is a marginal: hold the
+    # other two and ask whether the minimum of this axis conducts.
+    print("\n  WHICH OF THE THREE RESOLUTIONS WAS NECESSARY?")
+    print("    Read on INTERPRETABLE rows only (sham-positive settings excluded).")
+    for col, label in [
+        ("rate_hz", "temporal summation (DN rate)"),
+        ("background_pa", "background (relay operating point)"),
+    ]:
+        lo = interpretable[col].min()
+        at_lo = interpretable[interpretable[col] == lo]
+        n_ok = int(at_lo["conducts"].sum())
+        print(f"    {label}: at the minimum ({lo:g}), "
+              f"{n_ok} of {len(at_lo)} conditions conduct"
+              + ("  -> NOT necessary" if n_ok
+                 else "  -> NECESSARY (nothing conducts without it)"))
+    single = interpretable[interpretable["n_dn_cells"] <= 2]
+    multi = interpretable[interpretable["n_dn_cells"] > 2]
+    print(f"    co-activation: single-type DN sets (<=2 cells) conduct in "
+          f"{int(single['conducts'].sum())} of {len(single)} conditions; "
+          f"multi-type sets in\n      {int(multi['conducts'].sum())} of "
+          f"{len(multi)}")
+
+    print("\n  PER-CELL MOTOR NEURONS FIRED (best condition)")
+    for x in best["mn_attributable"][:15]:
+        d = best["per_mn"][x]
+        print(f"    {meta_type[x]:<22} bodyId {meta_bid[x]:<9} first spike "
+              f"{d['t_first_ms']:6.1f} ms, {d['n_spikes']:3d} spikes")
+    if len(best["mn_attributable"]) > 15:
+        print(f"    ... and {len(best['mn_attributable']) - 15} more")
+
+    print("\n  FROZEN-PHYSICS CONTROL")
+    print("    Level 3 OUTBOUND is a purely neural path, so unlike Level 1 the "
+          "frozen control is\n    EXPECTED to fire motor neurons -- freezing the "
+          "body cannot block a DN -> relay ->\n    MN projection.  What it tests "
+          "here is the opposite direction: whether anything in\n    the readout "
+          "needed the body to move.")
+    print(f"    frozen afferent spikes: "
+          f"{sorted(set(table['n_aff_frozen'].tolist()))} "
+          f"(0 means no sensory current was generated, as required)")
+    print(f"    MNs firing live but NOT frozen and NOT in the no-stimulus "
+          f"control: {sorted(set(table['n_mn_body_only'].tolist()))}")
 
 
 def run_multi_muscle(quick=False):
@@ -3283,6 +4125,61 @@ def run_background(quick=False):
     print("Done.")
     print("=" * 78)
     return {"background": result}
+
+
+def run_l3_outbound(quick=False):
+    """Run Deliverable 8: the Level 3 outbound exit gate.
+
+    Standalone because it is an exit gate: if it fails, the full-loop experiment
+    downstream of it cannot be interpreted and there is nothing to run.
+    """
+    pd.set_option("display.width", 240)
+
+    print("=" * 78)
+    print("Level 3, outbound half: does a DESCENDING COMMAND fire LF motor "
+          "neurons?")
+    print("=" * 78)
+    print("descending neuron -> VNC interneurons -> LF motor neurons.  The "
+          "motor pool is the\nREADOUT here, not the input: it receives zero "
+          "injected current.  Every number is a\nBrian2 SpikeMonitor count with "
+          "real MuJoCo physics in lockstep at dt = 0.1 ms, a\nfrozen-physics "
+          "control and a no-stimulus control at every condition.\nA current is "
+          "not a spike.")
+
+    net_data = load_full_vnc()
+    meta_df, body_ids = net_data["meta_df"], net_data["body_ids"]
+
+    from .muscle_decoder import MuscleDecoder
+
+    encoder = ProprioceptiveEncoder(meta_df, body_ids, leg="LF", side="L")
+    decoder = MuscleDecoder(meta_df, body_ids, force_model=True)
+    sim, model, data, state, groups, _names = build_settled_body(verbose=True)
+    t0 = time.time()
+    network = FullVNCNetwork(net_data)
+    print(f"  network: {network.n_neurons:,} neurons, "
+          f"{len(net_data['sources']):,} synapses, per-synapse delay "
+          f"{network.delays_ms.min():.2f}-{network.delays_ms.max():.2f} ms "
+          f"-- built in {time.time() - t0:.1f}s")
+
+    conduction = {
+        "encoder": encoder, "decoder": decoder, "network": network,
+        "body": (sim, model, data, state, groups),
+    }
+    result = measure_l3_outbound(
+        net_data, conduction=conduction,
+        rates_hz=(50, 200) if quick else L3_DN_RATES_HZ,
+        background_pa=(0.0, 125.0) if quick else L3_BACKGROUND_LADDER_PA,
+        burst_ms=100.0 if quick else 200.0,
+    )
+    convention = measure_l3_background_convention(
+        net_data, conduction=conduction,
+        background_pa=(125.0,) if quick else (75.0, 125.0),
+        burst_ms=100.0 if quick else 200.0,
+    )
+    print("\n" + "=" * 78)
+    print("Done.")
+    print("=" * 78)
+    return {"l3_outbound": result, "convention": convention}
 
 
 def run_all(quick=False):

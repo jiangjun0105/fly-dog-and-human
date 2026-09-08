@@ -27,6 +27,7 @@ Usage:
     python -m digital_drosophila benchmark navigation [--episodes 5] [--duration 5.0]
     python -m digital_drosophila check neural_model [--skip-gpu]
     python -m digital_drosophila check body_wiring [--quick]
+    python -m digital_drosophila dendritic prototype [--body-id 800578] [--compartments 5] [--duration 0.2] [--g-syn 0.05]
     python -m digital_drosophila check multi_muscle [--quick]
     python -m digital_drosophila check background [--quick]
 """
@@ -552,10 +553,27 @@ def main():
             from .body_wiring import run_background
 
             run_background(quick="--quick" in args)
+        elif subcommand == "l3_outbound":
+            from .body_wiring import run_l3_outbound
+
+            run_l3_outbound(quick="--quick" in args)
+        elif subcommand == "sign_policy":
+            from .sign_policy import run_sign_policy
+
+            policies = ("A", "B", "C")
+            if "--policy" in args:
+                i = args.index("--policy")
+                if i + 1 < len(args):
+                    policies = tuple(
+                        p.strip().upper()
+                        for p in args[i + 1].split(",") if p.strip()
+                    )
+            run_sign_policy(quick="--quick" in args, policies=policies)
         else:
             print(
                 "Usage: python -m digital_drosophila check "
-                "<neural_model|body_wiring|multi_muscle|background>\n"
+                "<neural_model|body_wiring|multi_muscle|background|l3_outbound"
+                "|sign_policy>\n"
                 "\nAvailable checks:\n"
                 "  neural_model   Verify synaptic delay + soft-bounded STDP\n"
                 "  body_wiring    Muscles drive physics; end-to-end conduction\n"
@@ -568,12 +586,54 @@ def main():
                 "  background     Relay operating point: does background drive\n"
                 "                 shrink the 28.6 ms synaptic floor, and does the\n"
                 "                 frozen-physics control stay silent when it does?\n"
-                "                 [--quick] fewer background levels"
+                "                 [--quick] fewer background levels\n"
+                "  l3_outbound    Level 3 outbound exit gate: does a descending\n"
+                "                 command fire LF motor neurons?  Motor pool is\n"
+                "                 the readout, not the input.  [--quick]\n"
+                "  sign_policy    Sensitivity sweep on the `unclear` neurotransmitter\n"
+                "                 sign (A=0 / B=+1 / C=-1): does Level 1's loop\n"
+                "                 closure, its frozen control, IN21A004's broadcast\n"
+                "                 dominance, the spontaneity ceiling and the L3 DN\n"
+                "                 ranking depend on a sign we chose by default?\n"
+                "                 [--quick] fewer background levels\n"
+                "                 [--policy A,B] run a subset"
             )
             sys.exit(1)
 
+    elif command == "dendritic":
+        mode = args[1] if len(args) > 1 else "prototype"
+        if mode != "prototype":
+            print(f"Unknown mode: {mode!r}. Available: prototype")
+            sys.exit(1)
+
+        body_id = 800578
+        n_compartments = 5
+        duration = 0.2
+        g_syn = 0.05
+        for i, arg in enumerate(args[2:], start=2):
+            if arg == "--body-id" and i + 1 < len(args):
+                body_id = int(args[i + 1])
+            elif arg == "--compartments" and i + 1 < len(args):
+                n_compartments = int(args[i + 1])
+            elif arg == "--duration" and i + 1 < len(args):
+                duration = float(args[i + 1])
+            elif arg == "--g-syn" and i + 1 < len(args):
+                g_syn = float(args[i + 1])
+
+        from .dendritic import run_prototype
+
+        run_prototype(
+            body_id=body_id,
+            n_compartments=n_compartments,
+            duration=duration,
+            g_syn_nS=g_syn,
+        )
+
     else:
-        print(f"Unknown command: {command!r}. Choose from: simulate, body, loop, learn, demo, benchmark, check")
+        print(
+            f"Unknown command: {command!r}. Choose from: simulate, body, loop, "
+            "learn, demo, benchmark, check, dendritic"
+        )
         sys.exit(1)
 
 

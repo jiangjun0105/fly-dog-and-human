@@ -106,7 +106,10 @@ How many of the 64 LF motor neurons does each closer contact?
 | `AN04B001` | 13 | 20% | acetylcholine | excitatory |
 | `IN23B024` | 4 | 6% | acetylcholine | excitatory |
 
-**The strongest excitatory closer reaches 72% of all LF motor neurons.** So "the signal
+**The strongest excitatory closer reaches 72% of all LF motor neurons.** (Verified 2026-08-19:
+`IN21A004` is the broadest *excitatory* cell, not the broadest overall — `IN08A002` (bodyId
+800256, glutamatergic) reaches **52 of 64**. The excitatory qualifier is load-bearing and should
+be stated wherever this figure appears.) So "the signal
 returned to a neuron presynaptic to the origin" is very nearly guaranteed by anatomy — it would
 be true for almost any origin we could have picked.
 

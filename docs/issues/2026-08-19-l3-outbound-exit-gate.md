@@ -1,9 +1,22 @@
 # L3 Child A: Outbound Exit Gate — can a descending command drive the leg?
 
 **Date:** 2026-08-19
-**Status:** todo
+**Status:** done — **gate PASSED**, see [lab entry](../lab/2026-08-19-l3-outbound-exit-gate.md)
 **Parent:** [Idea: full loop / descending command](../ideas/2026-08-19-full-loop-descending-command.md)
 **Type:** experiment (exit gate)
+
+> **Result (2026-08-19).** 50 of 52 in-scope LF MNs fire; DN → relay → MN in 1.6 ms at
+> best. **DNa02 does not conduct at any physiological rate** (0/52 at 50 Hz, at every
+> background level 0-125 pA) — only at 500 Hz, the refractory ceiling. **DN
+> co-activation** at 50 Hz + 115 pA is the only physiological route (50/52). **No single
+> resolution sufficed; any two of the three did.** Four controls clean: frozen physics
+> (0 afferent spikes, asserted), no-stimulus, **cut-projection** and **sham-DN** — the
+> last two were added after a first pass without them read as a clean pass in conditions
+> where the DN's projection could not have been responsible. **The strong-DN table below
+> is retracted**: it used the unsigned `network.py`-comment formula, and on the live path
+> 3 of its 6 types deliver exactly 0 mV (`consensusNt = unclear` → sign 0) and 2 are net
+> inhibitory. Candidate artefact #6 (the background convention) was tested and **not**
+> confirmed.
 
 ## Problem
 

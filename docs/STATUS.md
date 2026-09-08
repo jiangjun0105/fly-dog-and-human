@@ -33,6 +33,79 @@ rescued L1, one level up.
 
 → **[Idea: full loop / descending command](ideas/2026-08-19-full-loop-descending-command.md)**
 
+### L3 Child A outbound exit gate — PASSED, and co-activation was the answer
+
+**A descending command fires up to 50 of the 52 in-scope LF motor neurons**, DN → relay
+→ MN in **1.6 ms** at best, all four controls clean. **Level 3 is not blocked.**
+
+**But DNa02 does not conduct at any physiological rate.** At 50 Hz it fires **0 of 52**
+LF MNs at every background level (0, 75, 100, 115, 125 pA). It conducts only at 500 Hz,
+which is this LIF's refractory ceiling and 3.3× above any recorded fly rate.
+
+**DN co-activation is the only physiological route** — 12 cells (6 types) at **50 Hz**
+fire **29/52 at 100 pA and 50/52 at 115 pA**. Predicted by the idea doc; the same
+multi-source correction that rescued L1, one level up.
+
+**No single resolution sufficed; any two of the three did.** summation+background 49/52 ·
+summation+co-activation 39/52 · **background+co-activation 50/52 (the only physiological
+combination)**. All three at their minimum: 0/52.
+
+**Controls.** Frozen physics: **0 afferent spikes in all 63 conditions** (asserted).
+No-stimulus: **0/52 at every background**. **Cut projection** (same stimulus, the DNs'
+outgoing synapses zeroed): **0/52 and 0 relays in all 63**. **Sham DN** (0 mV onto
+LF-reaching relays, 121-126 mV elsewhere): **0/52 at all 9 settings**. The cut and sham
+controls were added after a first pass that lacked them read as a clean pass in
+conditions where the DN's projection could not have been responsible.
+
+**The spec's strong-DN table is retracted** — it used the unsigned `network.py`-comment
+formula. On the live path 3 of its 6 types deliver **exactly 0 mV** (all `consensusNt =
+unclear` → sign 0), 2 are net **inhibitory**, and only `DNg100` is strong. Live-path
+top6 (DNg101/11527, DNg100/10056, aSP22/10090, DNge073/11737, pIP1/10030, DNg37/10506)
+fires 39/52 where the spec's set fires **0/52**.
+
+**Candidate artefact #6 tested and NOT confirmed.** L1 withheld the background from its
+*driven* pool; here the pool is the *readout* and we left it in. Run both ways, the
+command still fires **44/52** with the readout at `V_rest` — worth ~5 MNs and ~4 ms, not
+the result.
+
+**The specificity problem changed scale rather than disappearing** (Open Question 3): the
+conducting conditions fire 96% of the motor pool, Jaccard overlap between DN sets up to
+1.000. **The outbound path is a broadcast too.** The full-loop experiment should ask a
+pattern-level question, not a per-cell one.
+
+→ **[Lab: L3 outbound exit gate](lab/2026-08-19-l3-outbound-exit-gate.md)** ·
+`python -m digital_drosophila check l3_outbound`
+
+### Sign-policy sensitivity — L1 survives; the L3 DN ranking does not
+
+**The first candidate artefact on this project that was swept and SURVIVED.** The `unclear`
+neurotransmitter sign (0 in `constants.NT_SIGN_MAP`, deleting the entire output of 2,931
+neurons including 658 motor neurons) was varied 0 / +1 / −1 with everything else held —
+serotonin/octopamine/dopamine at 0, histamine at −1, map **imported and overridden**, never
+reimplemented.
+
+**Level 1 is identical in all three arms**: 35.4 ms closure, 6 closers, 41/41 afferents,
+**0 frozen false positives**, 1.173 rad at 0 pA; 12.4 ms / +5.8 ms at 125 pA. `IN21A004`
+800802 holds **46 of 64 LF MNs at +33.17 mV** in every arm. Mechanism: the closing path
+contains no `unclear` cell, so the policy cannot reach it. **Not a licence to generalise** —
+at 125 pA, 37 neurons switch on under B.
+
+**Spontaneity ceiling re-measured per policy, not assumed.** The 0-125 pA / 0-11 Hz window
+transfers to all three; policy B's Poisson headroom *above* it shrinks 20 → **14 Hz**.
+
+**The L3 outbound top-6 IS policy-dependent.** Policy B inserts `DNg34` (10295, +404 mV) and
+`DNge149` (11466, +378) at #2 and #3 — both exactly 0.0 mV under A, and `DNg34` is the cell
+the L3 spec explicitly retired as silent. **But both have `predictedNt = octopamine`**, so
+policy B overrides a modulatory prediction its own rule protects; holding those 101 cells at
+0 restores A's list exactly.
+
+**`unclear` is not one class** — 276 of 2,952 have a specific `predictedNt`. Recommendation is
+to split by evidence, not pick a blanket sign. Also: the issue's census reads `predictedNt`
+(3,377/668); the **live path reads `consensusNt`** (2,931/658, 4.97% of synapses).
+
+→ **[Lab: sign-policy sensitivity](lab/2026-08-19-sign-policy-sensitivity.md)** ·
+`python -m digital_drosophila check sign_policy`
+
 ### L1 outcome (closed)
 
 **Child 0 complete. The loop conducts — but not in a form Level 1 can use.**
@@ -172,6 +245,8 @@ requirement. This is why 4.63 mV, and why the fix is breadth rather than drive.
   confirm no afferent spikes. Not yet run.
 
 ## Done
+
+- 2026-09-08: DendSNN prototype (`dendritic.py`) — neuPrint *does* serve skeletons + per-synapse coords, so compartmental models are buildable; but the 4x compartmental/point difference is not separable from unmeasured diameter and leak (sweep spans 0–465 Hz). Not scaled up ([lab entry](lab/2026-09-08-dendritic-compartmental-prototype.md))
 
 - 2026-08-17: Proprioceptive encoder (41 LF afferents) + muscle decoder (58 MN → 15 Hill-type muscles), size-principle weighted sum — fixed a decoding bug where 1 of 8 neurons firing drove joints backwards ([lab entry](lab/2026-08-17-babbling-loop-latency.md))
 

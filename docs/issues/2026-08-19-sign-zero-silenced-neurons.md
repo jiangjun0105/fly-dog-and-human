@@ -1,8 +1,24 @@
 # 13% of the Network Is Electrically Silenced by an Unexamined Sign Default
 
 **Date:** 2026-08-19
-**Status:** todo
+**Status:** sensitivity experiment DONE; policy decision still open
 **Type:** defect + sensitivity experiment
+
+> **RESULT (2026-08-19):** [Lab: sign-policy sensitivity](../lab/2026-08-19-sign-policy-sensitivity.md).
+> **Level 1 is not policy-dependent** — closure is identical under all three arms (35.4 ms /
+> 6 closers / 0 frozen at 0 pA; 12.4 ms / +5.8 ms at 125 pA), and `IN21A004` 800802 holds at
+> 46 of 64 / +33.17 mV in every arm, because the closing path contains no `unclear` cell.
+> **The L3 outbound top-6 IS policy-dependent** — policy B inserts `DNg34` (+404) and `DNge149`
+> (+378) at #2 and #3, both exactly 0.0 under A. But **both have `predictedNt = octopamine`**,
+> so policy B contradicts its own rule that octopamine stays 0; holding those 101 cells at 0
+> restores A's list exactly. Two corrections to this issue below.
+>
+> - The census here is on **`predictedNt`**; the live code path reads **`consensusNt`**, giving
+>   **2,931 silenced / 658 motor / 2,952 `unclear` / 4.97% of synapses**. Both correct, different
+>   columns — importing the map is necessary but not sufficient, the column matters too.
+> - `unclear` is **not one class**: 276 of the 2,952 have a specific `predictedNt`
+>   (94 acetylcholine, 80 serotonin, 64 glutamate, 21 octopamine, 14 histamine, 3 GABA).
+>   Recommended fix is to split by evidence rather than pick a blanket sign.
 
 ## Problem
 
@@ -15,6 +31,13 @@ weights_raw = log1p(count) * sign_vector * confidence * sign_scale * scale
 `sign_vector` is **+1** for acetylcholine, **−1** for GABA/glutamate, and **0** for everything
 else. A zero sign does not attenuate a synapse — it deletes it. The presynaptic neuron still
 receives input, integrates and fires; nothing downstream ever hears it.
+
+> **CENSUS CORRECTED 2026-08-19.** The figures below were counted from `predictedNt`. The live
+> weight path reads **`consensusNt`** (`network.py:435`). Correct numbers: **2,972 of 25,635
+> neurons (11.6%)** fully silenced, **4.97%** of synapses, of which `unclear` is 2,952. The
+> superclass breakdown is 672 motor / 570 sensory / 188 intrinsic / 99 efferent. The finding is
+> unchanged in substance — importing `NT_SIGN_MAP` was necessary but not sufficient; the *column*
+> matters too.
 
 **Measured on the full VNC (2026-08-19):**
 
