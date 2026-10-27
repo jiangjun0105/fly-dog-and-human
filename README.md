@@ -2,6 +2,9 @@
 
 Biologically-mapped spiking neural network for *Drosophila* motor control using Brian2 + GeNN and the male-cns:v0.9 connectome.
 
+![Male CNS specimen](docs/specimen.webp)
+<sub>Data: Male CNS v1.0 · FlyEM / HHMI Janelia · Cambridge · MRC LMB · Google · CC-BY 4.0</sub>
+
 ## Quick start
 
 ```bash
